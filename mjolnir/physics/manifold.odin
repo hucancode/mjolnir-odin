@@ -581,6 +581,21 @@ collide_cylinders :: proc(
 // Dispatch
 // ---------------------------------------------------------------------------
 
+// Wrap a single-point test result whose sphere was inflated by `margin`:
+// deflate the penetration back so separated-but-within-margin contacts come
+// out with negative penetration (speculative).
+@(private = "file")
+sphere_manifold :: #force_inline proc(
+  point: [3]f32,
+  normal: [3]f32,
+  penetration: f32,
+  h: bool,
+  margin: f32,
+) -> (m: Manifold, hit: bool) {
+  if !h do return
+  return manifold_from_single_point(point, normal, penetration - margin), true
+}
+
 // margin: speculative distance — contacts are generated while shapes are
 // still up to `margin` apart (penetration goes negative). The solver treats
 // separated points as speculative (velocity clamp only, no push).
@@ -597,24 +612,16 @@ collide :: proc(
   case FanCollider:
     return
   case SphereCollider:
+    inflated := SphereCollider{radius = shape_a.radius + margin}
     switch shape_b in collider_b {
     case FanCollider:
       return
     case SphereCollider:
-      inflated := SphereCollider{radius = shape_a.radius + margin}
-      point, normal, penetration, h := test_sphere_sphere(pos_a, inflated, pos_b, shape_b)
-      if !h do return
-      return manifold_from_single_point(point, normal, penetration - margin), true
+      return sphere_manifold(test_sphere_sphere(pos_a, inflated, pos_b, shape_b), margin)
     case BoxCollider:
-      inflated := SphereCollider{radius = shape_a.radius + margin}
-      point, normal, penetration, h := test_box_sphere(pos_b, rot_b, shape_b, pos_a, inflated, invert_normal = true)
-      if !h do return
-      return manifold_from_single_point(point, normal, penetration - margin), true
+      return sphere_manifold(test_box_sphere(pos_b, rot_b, shape_b, pos_a, inflated, invert_normal = true), margin)
     case CylinderCollider:
-      inflated := SphereCollider{radius = shape_a.radius + margin}
-      point, normal, penetration, h := test_sphere_cylinder(pos_a, inflated, pos_b, rot_b, shape_b)
-      if !h do return
-      return manifold_from_single_point(point, normal, penetration - margin), true
+      return sphere_manifold(test_sphere_cylinder(pos_a, inflated, pos_b, rot_b, shape_b), margin)
     }
   case BoxCollider:
     switch shape_b in collider_b {
@@ -622,9 +629,7 @@ collide :: proc(
       return
     case SphereCollider:
       inflated := SphereCollider{radius = shape_b.radius + margin}
-      point, normal, penetration, h := test_box_sphere(pos_a, rot_a, shape_a, pos_b, inflated)
-      if !h do return
-      return manifold_from_single_point(point, normal, penetration - margin), true
+      return sphere_manifold(test_box_sphere(pos_a, rot_a, shape_a, pos_b, inflated), margin)
     case BoxCollider:
       return collide_boxes(pos_a, rot_a, shape_a, pos_b, rot_b, shape_b, margin)
     case CylinderCollider:
@@ -636,9 +641,7 @@ collide :: proc(
       return
     case SphereCollider:
       inflated := SphereCollider{radius = shape_b.radius + margin}
-      point, normal, penetration, h := test_sphere_cylinder(pos_b, inflated, pos_a, rot_a, shape_a, invert_normal = true)
-      if !h do return
-      return manifold_from_single_point(point, normal, penetration - margin), true
+      return sphere_manifold(test_sphere_cylinder(pos_b, inflated, pos_a, rot_a, shape_a, invert_normal = true), margin)
     case BoxCollider:
       return collide_box_cylinder(pos_b, rot_b, shape_b, pos_a, rot_a, shape_a, invert_normal = true, margin = margin)
     case CylinderCollider:

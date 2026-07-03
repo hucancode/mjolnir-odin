@@ -183,142 +183,67 @@ swept_box_box :: proc(
   return result
 }
 
+// Conservative sweep radius for the sphere-sphere fallback: exact for
+// spheres, radial for cylinders (heights ignored, same as narrowphase
+// approximation), bounding sphere for boxes.
+@(private = "file")
+swept_radius :: proc(c: ^Collider) -> f32 {
+  switch s in c {
+  case SphereCollider:
+    return s.radius
+  case BoxCollider:
+    return linalg.length(s.half_extents)
+  case CylinderCollider:
+    return s.radius
+  case FanCollider:
+    return 0
+  }
+  return 0
+}
+
+// TOI of A moving by velocity_a against a stationary B. Exact slab tests for
+// sphere/cylinder-vs-aligned-box and aligned box-box; everything else falls
+// back to a conservative swept-sphere approximation.
 swept_test :: proc(
   collider_a, collider_b: ^Collider,
   pos_a, pos_b: [3]f32,
   rot_a, rot_b: quaternion128,
   velocity_a: [3]f32,
 ) -> TOIResult {
-      // For now, implement sphere-sphere and sphere-box
-  // Can extend to other shapes later
-  switch shape_a in collider_a {
-  case FanCollider:
-    return {} // fan collider are trigger-only
+  if _, a_is_fan := collider_a^.(FanCollider); a_is_fan do return {} // fans are trigger-only
+  if _, b_is_fan := collider_b^.(FanCollider); b_is_fan do return {}
+  #partial switch shape_a in collider_a {
   case SphereCollider:
-    switch shape_b in collider_b {
-    case FanCollider:
-      return {}
-    case SphereCollider:
-      return swept_sphere_sphere(
-        pos_a,
-        pos_b,
-        shape_a.radius,
-        shape_b.radius,
-        velocity_a,
-      )
-    case BoxCollider:
-      box_min := pos_b - shape_b.half_extents
-      box_max := pos_b + shape_b.half_extents
+    if box_b, is_box := collider_b^.(BoxCollider); is_box {
       return swept_sphere_box(
-        pos_a,
-        shape_a.radius,
-        velocity_a,
-        box_min,
-        box_max,
-      )
-    case CylinderCollider:
-      // Use cylinder radius (not bounding sphere) for radial collision
-      // This better matches the actual collision detection
-      return swept_sphere_sphere(
-        pos_a,
-        pos_b,
-        shape_a.radius,
-        shape_b.radius,
-        velocity_a,
-      )
-    }
-  case BoxCollider:
-    box_min := pos_a - shape_a.half_extents
-    box_max := pos_a + shape_a.half_extents
-    switch shape_b in collider_b {
-    case FanCollider:
-      return {}
-    case SphereCollider:
-      result := swept_sphere_box(
-        pos_b,
-        shape_b.radius,
-        -velocity_a,
-        box_min,
-        box_max,
-      )
-      if result.has_impact {
-        result.normal = -result.normal
-      }
-      return result
-    case BoxCollider:
-      // Box-box swept: use Minkowski sum approach
-      // Only works for axis-aligned boxes
-      is_a_aligned := is_identity_quaternion(rot_a)
-      is_b_aligned := is_identity_quaternion(rot_b)
-      if is_a_aligned && is_b_aligned {
-        return swept_box_box(
-          pos_a,
-          pos_b,
-          shape_a.half_extents,
-          shape_b.half_extents,
-          velocity_a,
-        )
-      }
-      // For oriented boxes, fall back to conservative sphere approximation
-      radius_a := linalg.length(shape_a.half_extents)
-      radius_b := linalg.length(shape_b.half_extents)
-      return swept_sphere_sphere(
-        pos_a,
-        pos_b,
-        radius_a,
-        radius_b,
-        velocity_a,
-      )
-    case CylinderCollider:
-      // Use cylinder radius for radial collision
-      box_radius := linalg.length(shape_a.half_extents)
-      return swept_sphere_sphere(
-        pos_a,
-        pos_b,
-        box_radius,
-        shape_b.radius,
-        velocity_a,
+        pos_a, shape_a.radius, velocity_a,
+        pos_b - box_b.half_extents, pos_b + box_b.half_extents,
       )
     }
   case CylinderCollider:
-    // Use cylinder radius for radial collision
-    switch shape_b in collider_b {
-    case FanCollider:
-      return {}
-    case SphereCollider:
-      result := swept_sphere_sphere(
-        pos_b,
-        pos_a,
-        shape_b.radius,
-        shape_a.radius,
-        -velocity_a,
-      )
-      if result.has_impact {
-        result.normal = -result.normal
-      }
-      return result
-    case BoxCollider:
-      // Use cylinder radius for radial collision
-      box_min := pos_b - shape_b.half_extents
-      box_max := pos_b + shape_b.half_extents
-      result := swept_sphere_box(
-        pos_a,
-        shape_a.radius,
-        velocity_a,
-        box_min,
-        box_max,
-      )
-      return result
-    case CylinderCollider:
-      // Use radii for radial collision
-      return swept_sphere_sphere(
-        pos_a,
-        pos_b,
-        shape_a.radius,
-        shape_b.radius,
-        velocity_a,
+    if box_b, is_box := collider_b^.(BoxCollider); is_box {
+      return swept_sphere_box(
+        pos_a, shape_a.radius, velocity_a,
+        pos_b - box_b.half_extents, pos_b + box_b.half_extents,
       )
     }
+  case BoxCollider:
+    if sph_b, is_sphere := collider_b^.(SphereCollider); is_sphere {
+      result := swept_sphere_box(
+        pos_b, sph_b.radius, -velocity_a,
+        pos_a - shape_a.half_extents, pos_a + shape_a.half_extents,
+      )
+      if result.has_impact do result.normal = -result.normal
+      return result
+    }
+    box_b, is_box := collider_b^.(BoxCollider)
+    if is_box && is_identity_quaternion(rot_a) && is_identity_quaternion(rot_b) {
+      return swept_box_box(pos_a, pos_b, shape_a.half_extents, box_b.half_extents, velocity_a)
+    }
   }
-  return {}
+  return swept_sphere_sphere(
+    pos_a, pos_b,
+    swept_radius(collider_a), swept_radius(collider_b),
+    velocity_a,
+  )
 }

@@ -345,10 +345,16 @@ draw_contacts :: proc(engine: ^mjolnir.Engine, dt: f32) {
     }
   }
   for c in engine.physics.static_contacts {
-    draw_one(engine, c.point, c.normal, c.penetration, c.normal_impulse, dt, life)
+    for i in 0 ..< c.count {
+      p := c.points[i]
+      draw_one(engine, p.point, c.normal, p.penetration, p.normal_impulse, dt, life)
+    }
   }
   for c in engine.physics.dynamic_contacts {
-    draw_one(engine, c.point, c.normal, c.penetration, c.normal_impulse, dt, life)
+    for i in 0 ..< c.count {
+      p := c.points[i]
+      draw_one(engine, p.point, c.normal, p.penetration, p.normal_impulse, dt, life)
+    }
   }
 }
 
@@ -459,22 +465,24 @@ panel :: proc(engine: ^mjolnir.Engine) {
     for c in engine.physics.static_contacts {
       if shown >= 6 do break
       shown += 1
+      p := c.points[0]
       mu.label(
         ctx,
         fmt.tprintf(
-          "Static Contact (%.1f,%.1f,%.1f) pen %.2f J %.1f",
-          c.point.x, c.point.y, c.point.z, c.penetration, c.normal_impulse,
+          "Static Contact x%d (%.1f,%.1f,%.1f) pen %.2f J %.1f",
+          c.count, p.point.x, p.point.y, p.point.z, p.penetration, p.normal_impulse,
         ),
       )
     }
     for c in engine.physics.dynamic_contacts {
       if shown >= 6 do break
       shown += 1
+      p := c.points[0]
       mu.label(
         ctx,
         fmt.tprintf(
-          "Dynamic Contact (%.1f,%.1f,%.1f) pen %.2f J %.1f",
-          c.point.x, c.point.y, c.point.z, c.penetration, c.normal_impulse,
+          "Dynamic Contact x%d (%.1f,%.1f,%.1f) pen %.2f J %.1f",
+          c.count, p.point.x, p.point.y, p.point.z, p.penetration, p.normal_impulse,
         ),
       )
     }

@@ -1,6 +1,5 @@
 package physics
 
-import cont "../containers"
 import "base:intrinsics"
 import "core:math"
 import "core:math/bits"
@@ -136,71 +135,34 @@ invert_tangent_k :: #force_inline proc(k11, k12, k22: f32) -> matrix[2, 2]f32 {
   }
 }
 
-prepare_contact_dynamic_dynamic :: proc(
-  contact: ^DynamicContact,
+// Generic over the body-B type: B == DynamicRigidBody compiles in body B's
+// mass/inertia/velocity contributions; B == StaticRigidBody compiles them out
+// (a static body is a zero-inv-mass body).
+prepare_contact :: proc(
+  contact: ^$C,
   body_a: ^DynamicRigidBody,
-  body_b: ^DynamicRigidBody,
-  dt: f32,
-) {
-  inv_mass_sum := body_a.inv_mass + body_b.inv_mass
-  centroid: [3]f32
-  for i in 0 ..< contact.count {
-    p := &contact.points[i]
-    centroid += p.point
-    p.r_a = p.point - body_a.position
-    p.r_b = p.point - body_b.position
-    r_a_cross_n := linalg.cross(p.r_a, contact.normal)
-    r_b_cross_n := linalg.cross(p.r_b, contact.normal)
-    angular_factor_a := linalg.dot(body_a.inv_inertia_world * r_a_cross_n, r_a_cross_n)
-    angular_factor_b := linalg.dot(body_b.inv_inertia_world * r_b_cross_n, r_b_cross_n)
-    normal_mass := inv_mass_sum + angular_factor_a + angular_factor_b
-    p.normal_mass = normal_mass > math.F32_EPSILON ? 1.0 / normal_mass : 0
-    p.base_separation = -p.penetration
-    vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a)
-    vel_b := body_b.velocity + linalg.cross(body_b.angular_velocity, p.r_b)
-    p.relative_velocity = linalg.dot(vel_b - vel_a, contact.normal)
-    p.max_normal_impulse = 0
-  }
-  centroid /= f32(contact.count)
-  contact.r_a_c = centroid - body_a.position
-  contact.r_b_c = centroid - body_b.position
-  contact.tangent1, contact.tangent2 = compute_tangent_basis(contact.normal)
-  rt_a1 := linalg.cross(contact.r_a_c, contact.tangent1)
-  rt_a2 := linalg.cross(contact.r_a_c, contact.tangent2)
-  rt_b1 := linalg.cross(contact.r_b_c, contact.tangent1)
-  rt_b2 := linalg.cross(contact.r_b_c, contact.tangent2)
-  ia1 := body_a.inv_inertia_world * rt_a1
-  ia2 := body_a.inv_inertia_world * rt_a2
-  ib1 := body_b.inv_inertia_world * rt_b1
-  ib2 := body_b.inv_inertia_world * rt_b2
-  k11 := inv_mass_sum + linalg.dot(ia1, rt_a1) + linalg.dot(ib1, rt_b1)
-  k12 := linalg.dot(ia1, rt_a2) + linalg.dot(ib1, rt_b2)
-  k22 := inv_mass_sum + linalg.dot(ia2, rt_a2) + linalg.dot(ib2, rt_b2)
-  contact.tangent_mass = invert_tangent_k(k11, k12, k22)
-  kt := linalg.dot(contact.normal, body_a.inv_inertia_world * contact.normal) +
-    linalg.dot(contact.normal, body_b.inv_inertia_world * contact.normal)
-  contact.twist_mass = kt > math.F32_EPSILON ? 1.0 / kt : 0
-}
-
-prepare_contact_dynamic_static :: proc(
-  contact: ^StaticContact,
-  body_a: ^DynamicRigidBody,
-  body_b: ^StaticRigidBody,
+  body_b: ^$B,
   dt: f32,
 ) {
   inv_mass_sum := body_a.inv_mass
+  when B == DynamicRigidBody do inv_mass_sum += body_b.inv_mass
   centroid: [3]f32
   for i in 0 ..< contact.count {
     p := &contact.points[i]
     centroid += p.point
     p.r_a = p.point - body_a.position
     r_a_cross_n := linalg.cross(p.r_a, contact.normal)
-    angular_factor_a := linalg.dot(body_a.inv_inertia_world * r_a_cross_n, r_a_cross_n)
-    normal_mass := inv_mass_sum + angular_factor_a
+    normal_mass := inv_mass_sum + linalg.dot(body_a.inv_inertia_world * r_a_cross_n, r_a_cross_n)
+    rel := -(body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a))
+    when B == DynamicRigidBody {
+      p.r_b = p.point - body_b.position
+      r_b_cross_n := linalg.cross(p.r_b, contact.normal)
+      normal_mass += linalg.dot(body_b.inv_inertia_world * r_b_cross_n, r_b_cross_n)
+      rel += body_b.velocity + linalg.cross(body_b.angular_velocity, p.r_b)
+    }
     p.normal_mass = normal_mass > math.F32_EPSILON ? 1.0 / normal_mass : 0
     p.base_separation = -p.penetration
-    vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a)
-    p.relative_velocity = linalg.dot(-vel_a, contact.normal)
+    p.relative_velocity = linalg.dot(rel, contact.normal)
     p.max_normal_impulse = 0
   }
   centroid /= f32(contact.count)
@@ -213,67 +175,51 @@ prepare_contact_dynamic_static :: proc(
   k11 := inv_mass_sum + linalg.dot(ia1, rt_a1)
   k12 := linalg.dot(ia1, rt_a2)
   k22 := inv_mass_sum + linalg.dot(ia2, rt_a2)
-  contact.tangent_mass = invert_tangent_k(k11, k12, k22)
   kt := linalg.dot(contact.normal, body_a.inv_inertia_world * contact.normal)
+  when B == DynamicRigidBody {
+    contact.r_b_c = centroid - body_b.position
+    rt_b1 := linalg.cross(contact.r_b_c, contact.tangent1)
+    rt_b2 := linalg.cross(contact.r_b_c, contact.tangent2)
+    ib1 := body_b.inv_inertia_world * rt_b1
+    ib2 := body_b.inv_inertia_world * rt_b2
+    k11 += linalg.dot(ib1, rt_b1)
+    k12 += linalg.dot(ib1, rt_b2)
+    k22 += linalg.dot(ib2, rt_b2)
+    kt += linalg.dot(contact.normal, body_b.inv_inertia_world * contact.normal)
+  }
+  contact.tangent_mass = invert_tangent_k(k11, k12, k22)
   contact.twist_mass = kt > math.F32_EPSILON ? 1.0 / kt : 0
-}
-
-prepare_contact :: proc {
-  prepare_contact_dynamic_dynamic,
-  prepare_contact_dynamic_static,
 }
 
 // ---------------------------------------------------------------------------
 // Warm start (per substep)
 // ---------------------------------------------------------------------------
 
-warmstart_contact_dynamic_dynamic :: proc(
-  contact: ^DynamicContact,
+warmstart_contact :: proc(
+  contact: ^$C,
   body_a: ^DynamicRigidBody,
-  body_b: ^DynamicRigidBody,
+  body_b: ^$B,
 ) {
   for i in 0 ..< contact.count {
     p := &contact.points[i]
     impulse_n := contact.normal * p.normal_impulse
     apply_impulse_at_point_no_wake(body_a, -impulse_n, p.point)
-    apply_impulse_at_point_no_wake(body_b, impulse_n, p.point)
+    when B == DynamicRigidBody do apply_impulse_at_point_no_wake(body_b, impulse_n, p.point)
   }
   centroid := body_a.position + contact.r_a_c
   impulse_t := contact.tangent1 * contact.tangent_impulse[0] +
     contact.tangent2 * contact.tangent_impulse[1]
   apply_impulse_at_point_no_wake(body_a, -impulse_t, centroid)
-  apply_impulse_at_point_no_wake(body_b, impulse_t, centroid)
+  when B == DynamicRigidBody do apply_impulse_at_point_no_wake(body_b, impulse_t, centroid)
   twist := contact.normal * contact.twist_impulse
   if body_a.enable_rotation {
     body_a.angular_velocity -= body_a.inv_inertia_world * twist
   }
-  if body_b.enable_rotation {
-    body_b.angular_velocity += body_b.inv_inertia_world * twist
+  when B == DynamicRigidBody {
+    if body_b.enable_rotation {
+      body_b.angular_velocity += body_b.inv_inertia_world * twist
+    }
   }
-}
-
-warmstart_contact_dynamic_static :: proc(
-  contact: ^StaticContact,
-  body_a: ^DynamicRigidBody,
-  body_b: ^StaticRigidBody,
-) {
-  for i in 0 ..< contact.count {
-    p := &contact.points[i]
-    impulse_n := contact.normal * p.normal_impulse
-    apply_impulse_at_point_no_wake(body_a, -impulse_n, p.point)
-  }
-  centroid := body_a.position + contact.r_a_c
-  impulse_t := contact.tangent1 * contact.tangent_impulse[0] +
-    contact.tangent2 * contact.tangent_impulse[1]
-  apply_impulse_at_point_no_wake(body_a, -impulse_t, centroid)
-  if body_a.enable_rotation {
-    body_a.angular_velocity -= body_a.inv_inertia_world * (contact.normal * contact.twist_impulse)
-  }
-}
-
-warmstart_contact :: proc {
-  warmstart_contact_dynamic_dynamic,
-  warmstart_contact_dynamic_static,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,30 +229,21 @@ warmstart_contact :: proc {
 // Current separation: base + how much the anchors moved along the normal
 // since prepare (translation-only approximation of box3d's delta tracking).
 @(private = "file")
-current_separation_dd :: #force_inline proc(
+current_separation :: #force_inline proc(
   p: ^ContactPoint,
-  contact: ^DynamicContact,
+  normal: [3]f32,
   body_a: ^DynamicRigidBody,
-  body_b: ^DynamicRigidBody,
-) -> f32 {
-  ds := (body_b.position - body_b.position0) - (body_a.position - body_a.position0)
-  return p.base_separation + linalg.dot(ds, contact.normal)
-}
-
-@(private = "file")
-current_separation_ds :: #force_inline proc(
-  p: ^ContactPoint,
-  contact: ^StaticContact,
-  body_a: ^DynamicRigidBody,
+  body_b: ^$B,
 ) -> f32 {
   ds := -(body_a.position - body_a.position0)
-  return p.base_separation + linalg.dot(ds, contact.normal)
+  when B == DynamicRigidBody do ds += body_b.position - body_b.position0
+  return p.base_separation + linalg.dot(ds, normal)
 }
 
-resolve_velocity_dynamic_dynamic :: proc(
-  contact: ^DynamicContact,
+resolve_velocity :: proc(
+  contact: ^$C,
   body_a: ^DynamicRigidBody,
-  body_b: ^DynamicRigidBody,
+  body_b: ^$B,
   soft: Softness,
   inv_h: f32,
   use_bias: bool,
@@ -316,7 +253,7 @@ resolve_velocity_dynamic_dynamic :: proc(
   centroid := body_a.position + contact.r_a_c
   for i in 0 ..< contact.count {
     p := &contact.points[i]
-    s := current_separation_dd(p, contact, body_a, body_b)
+    s := current_separation(p, contact.normal, body_a, body_b)
     bias: f32 = 0
     mass_scale: f32 = 1
     impulse_scale: f32 = 0
@@ -328,23 +265,26 @@ resolve_velocity_dynamic_dynamic :: proc(
       mass_scale = soft.mass_scale
       impulse_scale = soft.impulse_scale
     }
-    vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a)
-    vel_b := body_b.velocity + linalg.cross(body_b.angular_velocity, p.r_b)
-    vn := linalg.dot(vel_b - vel_a, contact.normal)
+    rel_p := -(body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a))
+    when B == DynamicRigidBody {
+      rel_p += body_b.velocity + linalg.cross(body_b.angular_velocity, p.r_b)
+    }
+    vn := linalg.dot(rel_p, contact.normal)
     delta_impulse := -p.normal_mass * mass_scale * (vn + bias) - impulse_scale * p.normal_impulse
     old_impulse := p.normal_impulse
     p.normal_impulse = max(old_impulse + delta_impulse, 0.0)
     p.max_normal_impulse = max(p.max_normal_impulse, p.normal_impulse)
     impulse := contact.normal * (p.normal_impulse - old_impulse)
     apply_impulse_at_point_no_wake(body_a, -impulse, p.point)
-    apply_impulse_at_point_no_wake(body_b, impulse, p.point)
+    when B == DynamicRigidBody do apply_impulse_at_point_no_wake(body_b, impulse, p.point)
     total_normal_impulse += p.normal_impulse
     lever_sum += p.normal_impulse * linalg.length(p.point - centroid)
   }
   // Coupled tangent friction at the manifold centroid, circular cone clamp
-  vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, contact.r_a_c)
-  vel_b := body_b.velocity + linalg.cross(body_b.angular_velocity, contact.r_b_c)
-  rel := vel_b - vel_a
+  rel := -(body_a.velocity + linalg.cross(body_a.angular_velocity, contact.r_a_c))
+  when B == DynamicRigidBody {
+    rel += body_b.velocity + linalg.cross(body_b.angular_velocity, contact.r_b_c)
+  }
   vt := [2]f32{linalg.dot(rel, contact.tangent1), linalg.dot(rel, contact.tangent2)}
   delta_t := contact.tangent_mass * -vt
   old_t := contact.tangent_impulse
@@ -358,10 +298,13 @@ resolve_velocity_dynamic_dynamic :: proc(
   applied_t := new_t - old_t
   impulse_t := contact.tangent1 * applied_t[0] + contact.tangent2 * applied_t[1]
   apply_impulse_at_point_no_wake(body_a, -impulse_t, centroid)
-  apply_impulse_at_point_no_wake(body_b, impulse_t, centroid)
+  when B == DynamicRigidBody do apply_impulse_at_point_no_wake(body_b, impulse_t, centroid)
   // Twist friction about the normal — resists spinning even on flat rest.
   // Torque budget comes from the normal impulses' lever arms.
-  wt := linalg.dot(body_b.angular_velocity - body_a.angular_velocity, contact.normal)
+  wt := linalg.dot(-body_a.angular_velocity, contact.normal)
+  when B == DynamicRigidBody {
+    wt += linalg.dot(body_b.angular_velocity, contact.normal)
+  }
   delta_w := contact.twist_mass * -wt
   max_twist := contact.friction * lever_sum
   old_w := contact.twist_impulse
@@ -370,74 +313,11 @@ resolve_velocity_dynamic_dynamic :: proc(
   if body_a.enable_rotation {
     body_a.angular_velocity -= body_a.inv_inertia_world * twist
   }
-  if body_b.enable_rotation {
-    body_b.angular_velocity += body_b.inv_inertia_world * twist
-  }
-}
-
-resolve_velocity_dynamic_static :: proc(
-  contact: ^StaticContact,
-  body_a: ^DynamicRigidBody,
-  body_b: ^StaticRigidBody,
-  soft: Softness,
-  inv_h: f32,
-  use_bias: bool,
-) {
-  total_normal_impulse: f32 = 0
-  lever_sum: f32 = 0
-  centroid := body_a.position + contact.r_a_c
-  for i in 0 ..< contact.count {
-    p := &contact.points[i]
-    s := current_separation_ds(p, contact, body_a)
-    bias: f32 = 0
-    mass_scale: f32 = 1
-    impulse_scale: f32 = 0
-    if s > 0 {
-      bias = s * inv_h
-    } else if use_bias {
-      bias = max(soft.bias_rate * s, -CONTACT_MAX_PUSH_SPEED)
-      mass_scale = soft.mass_scale
-      impulse_scale = soft.impulse_scale
+  when B == DynamicRigidBody {
+    if body_b.enable_rotation {
+      body_b.angular_velocity += body_b.inv_inertia_world * twist
     }
-    vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a)
-    vn := linalg.dot(-vel_a, contact.normal)
-    delta_impulse := -p.normal_mass * mass_scale * (vn + bias) - impulse_scale * p.normal_impulse
-    old_impulse := p.normal_impulse
-    p.normal_impulse = max(old_impulse + delta_impulse, 0.0)
-    p.max_normal_impulse = max(p.max_normal_impulse, p.normal_impulse)
-    impulse := contact.normal * (p.normal_impulse - old_impulse)
-    apply_impulse_at_point_no_wake(body_a, -impulse, p.point)
-    total_normal_impulse += p.normal_impulse
-    lever_sum += p.normal_impulse * linalg.length(p.point - centroid)
   }
-  vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, contact.r_a_c)
-  rel := -vel_a
-  vt := [2]f32{linalg.dot(rel, contact.tangent1), linalg.dot(rel, contact.tangent2)}
-  delta_t := contact.tangent_mass * -vt
-  old_t := contact.tangent_impulse
-  new_t := old_t + delta_t
-  max_friction := contact.friction * total_normal_impulse
-  len_t := linalg.length(new_t)
-  if len_t > max_friction {
-    new_t *= max_friction / max(len_t, math.F32_EPSILON)
-  }
-  contact.tangent_impulse = new_t
-  applied_t := new_t - old_t
-  impulse_t := contact.tangent1 * applied_t[0] + contact.tangent2 * applied_t[1]
-  apply_impulse_at_point_no_wake(body_a, -impulse_t, centroid)
-  wt := linalg.dot(-body_a.angular_velocity, contact.normal)
-  delta_w := contact.twist_mass * -wt
-  max_twist := contact.friction * lever_sum
-  old_w := contact.twist_impulse
-  contact.twist_impulse = clamp(old_w + delta_w, -max_twist, max_twist)
-  if body_a.enable_rotation {
-    body_a.angular_velocity -= body_a.inv_inertia_world * (contact.normal * (contact.twist_impulse - old_w))
-  }
-}
-
-resolve_velocity :: proc {
-  resolve_velocity_dynamic_dynamic,
-  resolve_velocity_dynamic_static,
 }
 
 // ---------------------------------------------------------------------------
@@ -446,49 +326,27 @@ resolve_velocity :: proc {
 
 // Applied separately so the soft bias never doubles as bounce, and gated on
 // max_normal_impulse so speculative points that never touched don't bounce.
-apply_restitution_dynamic_dynamic :: proc(
-  contact: ^DynamicContact,
+apply_restitution :: proc(
+  contact: ^$C,
   body_a: ^DynamicRigidBody,
-  body_b: ^DynamicRigidBody,
+  body_b: ^$B,
 ) {
   if contact.restitution == 0 do return
   for i in 0 ..< contact.count {
     p := &contact.points[i]
     if p.relative_velocity > -RESTITUTION_THRESHOLD || p.max_normal_impulse == 0 do continue
-    vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a)
-    vel_b := body_b.velocity + linalg.cross(body_b.angular_velocity, p.r_b)
-    vn := linalg.dot(vel_b - vel_a, contact.normal)
+    rel := -(body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a))
+    when B == DynamicRigidBody {
+      rel += body_b.velocity + linalg.cross(body_b.angular_velocity, p.r_b)
+    }
+    vn := linalg.dot(rel, contact.normal)
     delta_impulse := -p.normal_mass * (vn + contact.restitution * p.relative_velocity)
     old_impulse := p.normal_impulse
     p.normal_impulse = max(old_impulse + delta_impulse, 0.0)
     impulse := contact.normal * (p.normal_impulse - old_impulse)
     apply_impulse_at_point_no_wake(body_a, -impulse, p.point)
-    apply_impulse_at_point_no_wake(body_b, impulse, p.point)
+    when B == DynamicRigidBody do apply_impulse_at_point_no_wake(body_b, impulse, p.point)
   }
-}
-
-apply_restitution_dynamic_static :: proc(
-  contact: ^StaticContact,
-  body_a: ^DynamicRigidBody,
-  body_b: ^StaticRigidBody,
-) {
-  if contact.restitution == 0 do return
-  for i in 0 ..< contact.count {
-    p := &contact.points[i]
-    if p.relative_velocity > -RESTITUTION_THRESHOLD || p.max_normal_impulse == 0 do continue
-    vel_a := body_a.velocity + linalg.cross(body_a.angular_velocity, p.r_a)
-    vn := linalg.dot(-vel_a, contact.normal)
-    delta_impulse := -p.normal_mass * (vn + contact.restitution * p.relative_velocity)
-    old_impulse := p.normal_impulse
-    p.normal_impulse = max(old_impulse + delta_impulse, 0.0)
-    impulse := contact.normal * (p.normal_impulse - old_impulse)
-    apply_impulse_at_point_no_wake(body_a, -impulse, p.point)
-  }
-}
-
-apply_restitution :: proc {
-  apply_restitution_dynamic_dynamic,
-  apply_restitution_dynamic_static,
 }
 
 // ---------------------------------------------------------------------------
@@ -503,88 +361,39 @@ SolverPass :: enum {
   Restitution,
 }
 
+// One pass over a contact slice. indices == nil means the whole slice.
+// Generic over contact type — handle types on the contact pick the right pools.
 @(private = "file")
-run_pass_range_dynamic :: proc(
+run_pass :: proc(
   world: ^World,
+  contacts: []$C,
   indices: []int,
   pass: SolverPass,
   soft: Softness,
   inv_h: f32,
 ) {
-  contacts := world.dynamic_contacts[:]
-  #no_bounds_check for idx in indices {
-    c := &contacts[idx]
+  n := indices != nil ? len(indices) : len(contacts)
+  #no_bounds_check for k in 0 ..< n {
+    c := &contacts[indices != nil ? indices[k] : k]
     a := get(world, c.body_a) or_continue
     b := get(world, c.body_b) or_continue
     switch pass {
     case .Warmstart:
-      warmstart_contact_dynamic_dynamic(c, a, b)
+      warmstart_contact(c, a, b)
     case .Bias:
-      resolve_velocity_dynamic_dynamic(c, a, b, soft, inv_h, true)
+      resolve_velocity(c, a, b, soft, inv_h, true)
     case .Relax:
-      resolve_velocity_dynamic_dynamic(c, a, b, soft, inv_h, false)
+      resolve_velocity(c, a, b, soft, inv_h, false)
     case .Restitution:
-      apply_restitution_dynamic_dynamic(c, a, b)
-    }
-  }
-}
-
-@(private = "file")
-run_pass_range_static :: proc(
-  world: ^World,
-  indices: []int,
-  pass: SolverPass,
-  soft: Softness,
-  inv_h: f32,
-) {
-  contacts := world.static_contacts[:]
-  #no_bounds_check for idx in indices {
-    c := &contacts[idx]
-    a := cont.get(world.bodies, c.body_a) or_continue
-    b := cont.get(world.static_bodies, c.body_b) or_continue
-    switch pass {
-    case .Warmstart:
-      warmstart_contact_dynamic_static(c, a, b)
-    case .Bias:
-      resolve_velocity_dynamic_static(c, a, b, soft, inv_h, true)
-    case .Relax:
-      resolve_velocity_dynamic_static(c, a, b, soft, inv_h, false)
-    case .Restitution:
-      apply_restitution_dynamic_static(c, a, b)
+      apply_restitution(c, a, b)
     }
   }
 }
 
 @(private = "file")
 sequential_pass :: proc(world: ^World, pass: SolverPass, soft, static_soft: Softness, inv_h: f32) {
-  for &c in world.dynamic_contacts {
-    a := get(world, c.body_a) or_continue
-    b := get(world, c.body_b) or_continue
-    switch pass {
-    case .Warmstart:
-      warmstart_contact_dynamic_dynamic(&c, a, b)
-    case .Bias:
-      resolve_velocity_dynamic_dynamic(&c, a, b, soft, inv_h, true)
-    case .Relax:
-      resolve_velocity_dynamic_dynamic(&c, a, b, soft, inv_h, false)
-    case .Restitution:
-      apply_restitution_dynamic_dynamic(&c, a, b)
-    }
-  }
-  for &c in world.static_contacts {
-    a := cont.get(world.bodies, c.body_a) or_continue
-    b := cont.get(world.static_bodies, c.body_b) or_continue
-    switch pass {
-    case .Warmstart:
-      warmstart_contact_dynamic_static(&c, a, b)
-    case .Bias:
-      resolve_velocity_dynamic_static(&c, a, b, static_soft, inv_h, true)
-    case .Relax:
-      resolve_velocity_dynamic_static(&c, a, b, static_soft, inv_h, false)
-    case .Restitution:
-      apply_restitution_dynamic_static(&c, a, b)
-    }
-  }
+  run_pass(world, world.dynamic_contacts[:], nil, pass, soft, inv_h)
+  run_pass(world, world.static_contacts[:], nil, pass, static_soft, inv_h)
 }
 
 run_substep_loop_sequential :: proc(world: ^World, h: f32, num_substeps: int, ccd_handled: []bool) {
@@ -637,19 +446,19 @@ worker_contact_phase :: proc(
       s := data.thread_id * chunk
       e := min(s + chunk, bucket_len)
       if s < e {
-        run_pass_range_dynamic(world, bucket[s:e], pass, soft, inv_h)
+        run_pass(world, world.dynamic_contacts[:], bucket[s:e], pass, soft, inv_h)
       }
     }
     spin_barrier_wait(data.barrier, local_sense, expected)
   }
   // Overflow contacts share bodies with every color; single thread only.
   if data.thread_id == 0 {
-    run_pass_range_dynamic(world, world.solver_overflow[:], pass, soft, inv_h)
+    run_pass(world, world.dynamic_contacts[:], world.solver_overflow[:], pass, soft, inv_h)
   }
   spin_barrier_wait(data.barrier, local_sense, expected)
-  shard := world.solver_static_shards[data.thread_id % world.solver_static_shard_count][:]
   if data.thread_id < world.solver_static_shard_count {
-    run_pass_range_static(world, shard, pass, static_soft, inv_h)
+    shard := world.solver_static_shards[data.thread_id][:]
+    run_pass(world, world.static_contacts[:], shard, pass, static_soft, inv_h)
   }
   spin_barrier_wait(data.barrier, local_sense, expected)
 }

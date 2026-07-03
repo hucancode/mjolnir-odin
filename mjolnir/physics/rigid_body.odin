@@ -218,22 +218,6 @@ apply_impulse_at_point_no_wake :: #force_inline proc(
   self.angular_velocity += self.inv_inertia_world * angular_impulse
 }
 
-integrate :: proc(self: ^DynamicRigidBody, dt: f32) {
-  if self.is_sleeping do return
-  self.velocity += self.force * self.inv_mass * dt
-  if self.enable_rotation {
-    self.angular_velocity += (self.inv_inertia_world * self.torque) * dt
-  }
-  self.velocity *= math.pow(1.0 - self.linear_damping, dt)
-  if self.enable_rotation {
-    self.angular_velocity *= math.pow(1.0 - self.angular_damping, dt)
-  } else {
-    self.angular_velocity = {}
-  }
-  self.force = {}
-  self.torque = {}
-}
-
 update_cached_aabb :: proc(self: ^RigidBody) {
   self.cached_aabb = collider_calculate_aabb(
     &self.collider,

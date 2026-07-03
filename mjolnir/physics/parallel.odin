@@ -180,19 +180,26 @@ sequential_bvh_refit :: proc(physics: ^World) {
   geometry.bvh_refit(&physics.dynamic_bvh)
 }
 
-// Process one dynamic-dynamic broadphase pair into a contact. Returns 1 if narrowphase test was run.
-narrowphase_dynamic_pair :: #force_inline proc(
+// Narrowphase one broadphase pair into a contact. Generic over the B-side
+// handle (dynamic or static) and matching contact type. Returns 1 if the
+// narrowphase test actually ran (pre-culls return 0).
+narrowphase_pair :: #force_inline proc(
   physics: ^World,
-  pair: geometry.BVHOverlapPair(DynamicBroadPhaseEntry),
-  out: ^[dynamic]DynamicContact,
+  handle_a: DynamicRigidBodyHandle,
+  handle_b: $H,
+  warmstart: ^map[u64]ContactWarmstart,
+  out: ^[dynamic]$C,
 ) -> (narrow_tests: int) {
-  handle_a := pair.a.handle
-  handle_b := pair.b.handle
   body_a := get(physics, handle_a) or_else nil
   body_b := get(physics, handle_b) or_else nil
   if body_a == nil || body_b == nil do return
-  if body_a.is_killed || body_b.is_killed do return
-  if body_a.is_sleeping && body_b.is_sleeping do return
+  if body_a.is_killed do return
+  when H == DynamicRigidBodyHandle {
+    if body_b.is_killed do return
+    if body_a.is_sleeping && body_b.is_sleeping do return
+  } else {
+    if body_a.is_sleeping do return
+  }
   if !bounding_spheres_intersect(
     body_a.cached_sphere_center, body_a.cached_sphere_radius + SPECULATIVE_DISTANCE,
     body_b.cached_sphere_center, body_b.cached_sphere_radius,
@@ -203,8 +210,10 @@ narrowphase_dynamic_pair :: #force_inline proc(
   manifold, hit := collide_bodies(body_a, body_b, SPECULATIVE_DISTANCE)
   if !hit do return
   if body_a.is_sleeping do wake_up(body_a)
-  if body_b.is_sleeping do wake_up(body_b)
-  contact := DynamicContact {
+  when H == DynamicRigidBodyHandle {
+    if body_b.is_sleeping do wake_up(body_b)
+  }
+  contact := C {
     body_a      = handle_a,
     body_b      = handle_b,
     normal      = manifold.normal,
@@ -219,52 +228,7 @@ narrowphase_dynamic_pair :: #force_inline proc(
       feature_id  = manifold.points[i].feature_id,
     }
   }
-  hash := collision_pair_hash(handle_a, handle_b)
-  if w, found := &physics.prev_dynamic_warmstart[hash]; found {
-    contact_apply_warmstart(&contact, w)
-  }
-  append(out, contact)
-  return
-}
-
-narrowphase_static_pair :: #force_inline proc(
-  physics: ^World,
-  pair: geometry.BVHCrossPair(DynamicBroadPhaseEntry, StaticBroadPhaseEntry),
-  out: ^[dynamic]StaticContact,
-) -> (narrow_tests: int) {
-  handle_a := pair.a.handle
-  handle_b := pair.b.handle
-  body_a := get(physics, handle_a) or_else nil
-  body_b := get(physics, handle_b) or_else nil
-  if body_a == nil || body_b == nil do return
-  if body_a.is_killed || body_a.is_sleeping do return
-  if !bounding_spheres_intersect(
-    body_a.cached_sphere_center, body_a.cached_sphere_radius + SPECULATIVE_DISTANCE,
-    body_b.cached_sphere_center, body_b.cached_sphere_radius,
-  ) {
-    return
-  }
-  narrow_tests = 1
-  manifold, hit := collide_bodies(body_a, body_b, SPECULATIVE_DISTANCE)
-  if !hit do return
-  if body_a.is_sleeping do wake_up(body_a)
-  contact := StaticContact {
-    body_a      = handle_a,
-    body_b      = handle_b,
-    normal      = manifold.normal,
-    count       = manifold.count,
-    restitution = mix_restitution(body_a.restitution, body_b.restitution),
-    friction    = mix_friction(body_a.friction, body_b.friction),
-  }
-  for i in 0 ..< manifold.count {
-    contact.points[i] = ContactPoint {
-      point       = manifold.points[i].point,
-      penetration = manifold.points[i].penetration,
-      feature_id  = manifold.points[i].feature_id,
-    }
-  }
-  hash := collision_pair_hash(handle_a, handle_b)
-  if w, found := &physics.prev_static_warmstart[hash]; found {
+  if w, found := &warmstart[collision_pair_hash(handle_a, handle_b)]; found {
     contact_apply_warmstart(&contact, w)
   }
   append(out, contact)
@@ -282,10 +246,23 @@ broadphase_collect_pairs :: proc(physics: ^World) -> (
   return
 }
 
+@(private = "file")
+narrowphase_all :: proc(
+  physics: ^World,
+  dynamic_pairs: []geometry.BVHOverlapPair(DynamicBroadPhaseEntry),
+  static_pairs: []geometry.BVHCrossPair(DynamicBroadPhaseEntry, StaticBroadPhaseEntry),
+) {
+  for pair in dynamic_pairs {
+    narrowphase_pair(physics, pair.a.handle, pair.b.handle, &physics.prev_dynamic_warmstart, &physics.dynamic_contacts)
+  }
+  for pair in static_pairs {
+    narrowphase_pair(physics, pair.a.handle, pair.b.handle, &physics.prev_static_warmstart, &physics.static_contacts)
+  }
+}
+
 sequential_collision_detection_traversal :: proc(physics: ^World) {
   dynamic_pairs, static_pairs := broadphase_collect_pairs(physics)
-  for pair in dynamic_pairs do narrowphase_dynamic_pair(physics, pair, &physics.dynamic_contacts)
-  for pair in static_pairs do narrowphase_static_pair(physics, pair, &physics.static_contacts)
+  narrowphase_all(physics, dynamic_pairs[:], static_pairs[:])
 }
 
 ccd_step_body :: proc(
@@ -294,7 +271,6 @@ ccd_step_body :: proc(
   idx_a: int,
   dt: f32,
   ccd_handled: []bool,
-  dyn_candidates: ^[dynamic]DynamicBroadPhaseEntry,
   static_candidates: ^[dynamic]StaticBroadPhaseEntry,
 ) -> (tested: bool, candidate_count: int) {
   if body_a.is_killed || body_a.is_sleeping do return
@@ -334,7 +310,6 @@ ccd_step_body :: proc(
 
 ccd_task_dynamic :: proc(task: thread.Task) {
   data := (^CCD_Task_Data_Dynamic)(task.data)
-  dyn_candidates := make([dynamic]DynamicBroadPhaseEntry, 0, 64, context.temp_allocator)
   static_candidates := make([dynamic]StaticBroadPhaseEntry, 0, 64, context.temp_allocator)
   BATCH_SIZE :: 32
   for {
@@ -345,7 +320,7 @@ ccd_task_dynamic :: proc(task: thread.Task) {
       if idx_a >= len(data.physics.bodies.entries) do break
       entry_a := &data.physics.bodies.entries[idx_a]
       if !entry_a.active do continue
-      tested, cands := ccd_step_body(data.physics, &entry_a.item, idx_a, data.dt, data.ccd_handled, &dyn_candidates, &static_candidates)
+      tested, cands := ccd_step_body(data.physics, &entry_a.item, idx_a, data.dt, data.ccd_handled, &static_candidates)
       if tested do data.bodies_tested += 1
       data.total_candidates += cands
     }
@@ -403,121 +378,76 @@ sequential_ccd :: proc(
   dt: f32,
   ccd_handled: []bool,
 ) -> (bodies_tested: int, total_candidates: int) {
-  dyn_candidates := make([dynamic]DynamicBroadPhaseEntry, 0, 64, context.temp_allocator)
   static_candidates := make([dynamic]StaticBroadPhaseEntry, 0, 64, context.temp_allocator)
   #no_bounds_check for &entry_a, idx_a in physics.bodies.entries do if entry_a.active {
-    tested, cands := ccd_step_body(physics, &entry_a.item, idx_a, dt, ccd_handled, &dyn_candidates, &static_candidates)
+    tested, cands := ccd_step_body(physics, &entry_a.item, idx_a, dt, ccd_handled, &static_candidates)
     if tested do bodies_tested += 1
     total_candidates += cands
   }
   return
 }
 
-// Collision detection using BVH tree traversal (O(N) instead of O(N log N))
-// This finds all overlapping pairs in a single tree traversal
+// Collision detection using BVH tree-vs-tree traversal: O(N + K) where K is
+// the number of overlapping pairs. Pairs are split across threads; each thread
+// appends into its own contact arrays which are concatenated afterwards.
 Collision_Detection_Task_Data_Traversal :: struct {
-  physics:            ^World,
-  dynamic_pairs:      []geometry.BVHOverlapPair(DynamicBroadPhaseEntry),
-  static_pairs:       []geometry.BVHCrossPair(DynamicBroadPhaseEntry, StaticBroadPhaseEntry),
-  start:              int,
-  end:                int,
-  dynamic_contacts:   [dynamic]DynamicContact,
-  static_contacts:    [dynamic]StaticContact,
-  // Thread timing instrumentation
-  thread_id:          int,
-  elapsed_time:       time.Duration,
-  pairs_tested:       int,
-  narrow_phase_tests: int,
+  physics:          ^World,
+  dynamic_pairs:    []geometry.BVHOverlapPair(DynamicBroadPhaseEntry),
+  static_pairs:     []geometry.BVHCrossPair(DynamicBroadPhaseEntry, StaticBroadPhaseEntry),
+  start:            int,
+  end:              int,
+  dynamic_contacts: [dynamic]DynamicContact,
+  static_contacts:  [dynamic]StaticContact,
 }
 
 collision_detection_task_traversal :: proc(task: thread.Task) {
   data := (^Collision_Detection_Task_Data_Traversal)(task.data)
-  task_start := time.now()
-  defer data.elapsed_time = time.since(task_start)
-
   // Dynamic pairs in [start, end) clipped to dynamic_pairs range
   dyn_end := min(data.end, len(data.dynamic_pairs))
   #no_bounds_check for i in data.start ..< dyn_end {
-    data.pairs_tested += 1
-    data.narrow_phase_tests += narrowphase_dynamic_pair(data.physics, data.dynamic_pairs[i], &data.dynamic_contacts)
+    pair := data.dynamic_pairs[i]
+    narrowphase_pair(data.physics, pair.a.handle, pair.b.handle, &data.physics.prev_dynamic_warmstart, &data.dynamic_contacts)
   }
-
   static_start := max(0, data.start - len(data.dynamic_pairs))
   static_end := min(data.end - len(data.dynamic_pairs), len(data.static_pairs))
   #no_bounds_check for i in static_start ..< static_end {
-    data.pairs_tested += 1
-    data.narrow_phase_tests += narrowphase_static_pair(data.physics, data.static_pairs[i], &data.static_contacts)
+    pair := data.static_pairs[i]
+    narrowphase_pair(data.physics, pair.a.handle, pair.b.handle, &data.physics.prev_static_warmstart, &data.static_contacts)
   }
 }
 
-// New collision detection using tree-vs-tree traversal
-// This is O(N + K) instead of O(N log N) where K is number of overlapping pairs
 parallel_collision_detection_traversal :: proc(
   self: ^World,
   num_threads := DEFAULT_THREAD_COUNT,
 ) {
-  parallel_start := time.now()
-
   if len(self.dynamic_bvh.primitives) == 0 do return
-
-  traversal_start := time.now()
   dynamic_pairs, static_pairs := broadphase_collect_pairs(self)
-  traversal_time := time.since(traversal_start)
-
   total_pairs := len(dynamic_pairs) + len(static_pairs)
-
   when ENABLE_VERBOSE_LOG {
     log.infof(
-      "Tree traversal found %d dynamic pairs + %d static pairs = %d total in %v",
+      "Tree traversal found %d dynamic pairs + %d static pairs",
       len(dynamic_pairs),
       len(static_pairs),
-      total_pairs,
-      traversal_time,
     )
   }
-
   if total_pairs == 0 do return
-
-  per_thread_dyn_cap := max(64, len(dynamic_pairs) / max(1, num_threads) + 32)
-  per_thread_sta_cap := max(64, len(static_pairs) / max(1, num_threads) + 32)
-
-  // If few pairs or single threaded, process sequentially
   if total_pairs < 100 || num_threads == 1 {
-    task_data := Collision_Detection_Task_Data_Traversal {
-      physics       = self,
-      dynamic_pairs = dynamic_pairs[:],
-      static_pairs  = static_pairs[:],
-      start         = 0,
-      end           = total_pairs,
-      dynamic_contacts = make([dynamic]DynamicContact, 0, len(dynamic_pairs), context.temp_allocator),
-      static_contacts = make([dynamic]StaticContact, 0, len(static_pairs), context.temp_allocator),
-    }
-    collision_detection_task_traversal(thread.Task{data = &task_data})
-
-    for contact in task_data.dynamic_contacts {
-      append(&self.dynamic_contacts, contact)
-    }
-    for contact in task_data.static_contacts {
-      append(&self.static_contacts, contact)
-    }
+    narrowphase_all(self, dynamic_pairs[:], static_pairs[:])
     return
   }
 
-  // Parallel processing of pairs
-  setup_start := time.now()
+  per_thread_dyn_cap := max(64, len(dynamic_pairs) / max(1, num_threads) + 32)
+  per_thread_sta_cap := max(64, len(static_pairs) / max(1, num_threads) + 32)
   pairs_per_thread := (total_pairs + num_threads - 1) / num_threads
-
   task_data_array := make(
     []Collision_Detection_Task_Data_Traversal,
     num_threads,
     context.temp_allocator,
   )
-
   for i in 0 ..< num_threads {
     start := i * pairs_per_thread
     end := min((i + 1) * pairs_per_thread, total_pairs)
     if start >= total_pairs do break
-
     task_data_array[i] = Collision_Detection_Task_Data_Traversal {
       physics          = self,
       dynamic_pairs    = dynamic_pairs[:],
@@ -526,9 +456,7 @@ parallel_collision_detection_traversal :: proc(
       end              = end,
       dynamic_contacts = make([dynamic]DynamicContact, 0, per_thread_dyn_cap, context.temp_allocator),
       static_contacts  = make([dynamic]StaticContact, 0, per_thread_sta_cap, context.temp_allocator),
-      thread_id        = i,
     }
-
     thread.pool_add_task(
       &self.thread_pool,
       context.allocator,
@@ -537,21 +465,7 @@ parallel_collision_detection_traversal :: proc(
       i,
     )
   }
-  setup_time := time.since(setup_start)
-
-  // Wait for completion
-  parallel_exec_start := time.now()
   pool_wait(&self.thread_pool)
-  parallel_exec_time := time.since(parallel_exec_start)
-
-  // Collect results
-  collection_start := time.now()
-  total_pairs_tested := 0
-  total_narrow_tests := 0
-  min_time := time.Duration(1e10) // 10 billion nano seconds = 10s
-  max_time := time.Duration(0)
-  total_time := time.Duration(0)
-
   for &task_data in task_data_array {
     for contact in task_data.dynamic_contacts {
       append(&self.dynamic_contacts, contact)
@@ -559,35 +473,5 @@ parallel_collision_detection_traversal :: proc(
     for contact in task_data.static_contacts {
       append(&self.static_contacts, contact)
     }
-    if task_data.pairs_tested > 0 {
-      total_pairs_tested += task_data.pairs_tested
-      total_narrow_tests += task_data.narrow_phase_tests
-      min_time = min(min_time, task_data.elapsed_time)
-      max_time = max(max_time, task_data.elapsed_time)
-      total_time += task_data.elapsed_time
-    }
-  }
-  collection_time := time.since(collection_start)
-  total_parallel_time := time.since(parallel_start)
-
-  when ENABLE_VERBOSE_LOG {
-    avg_time := total_time / time.Duration(num_threads)
-    variance_pct := 0.0
-    if avg_time > 0 {
-      variance_pct = f64(max_time - min_time) / f64(avg_time) * 100.0
-    }
-
-    log.infof(
-      "Traversal Collision Detection: %d pairs, %d narrow tests, %d contacts in %v (traversal: %v, setup: %v, exec: %v, collect: %v, variance: %.1f%%)",
-      total_pairs_tested,
-      total_narrow_tests,
-      len(self.dynamic_contacts) + len(self.static_contacts),
-      total_parallel_time,
-      traversal_time,
-      setup_time,
-      parallel_exec_time,
-      collection_time,
-      variance_pct,
-    )
   }
 }

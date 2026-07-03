@@ -199,14 +199,14 @@ bench_narrowphase_box_box :: proc(t: ^testing.T) {
 		rounds = 200_000, user_data = &state,
 		bench = proc(opts: ^time.Benchmark_Options, _: runtime.Allocator) -> time.Benchmark_Error {
 			s := cast(^bench_pair_state)opts.user_data
-			for _ in 0 ..< opts.rounds do _, _, _, _ = test_box_box(s.pa, s.q, s.a_box, s.pb, s.q, s.b_box)
+			for _ in 0 ..< opts.rounds do _, _ = collide_boxes(s.pa, s.q, s.a_box, s.pb, s.q, s.b_box, 0)
 			opts.count = opts.rounds
 			return .Okay
 		},
 	}
 	err := time.benchmark(&opts)
 	testing.expect(t, err == .Okay, "bench failed")
-	log.infof("test_box_box %d rounds in %v (%d ns/op)",
+	log.infof("collide_boxes %d rounds in %v (%d ns/op)",
 		opts.rounds, opts.duration, time.duration_nanoseconds(opts.duration) / i64(opts.rounds))
 }
 

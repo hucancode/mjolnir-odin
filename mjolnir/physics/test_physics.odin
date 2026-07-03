@@ -9,33 +9,6 @@ import "core:testing"
 import "core:time"
 
 @(test)
-test_rigid_body_integration :: proc(t: ^testing.T) {
-  body: DynamicRigidBody
-  rigid_body_init(&body, {}, linalg.QUATERNIONF32_IDENTITY, 10.0, false)
-  force := [3]f32{100, 0, 0}
-  apply_force(&body, force)
-  dt := f32(0.016)
-  integrate(&body, dt)
-  // Account for damping: velocity gets multiplied by exponential decay factor pow(1 - damping, dt)
-  damping_factor := math.pow(1.0 - body.linear_damping, dt)
-  expected_velocity := force * body.inv_mass * dt * damping_factor
-  testing.expect(
-    t,
-    abs(body.velocity.x - expected_velocity.x) < 0.001 &&
-    abs(body.velocity.y - expected_velocity.y) < 0.001 &&
-    abs(body.velocity.z - expected_velocity.z) < 0.001,
-    "Velocity should integrate force over time with damping",
-  )
-  testing.expect(
-    t,
-    abs(body.force.x) < 0.001 &&
-    abs(body.force.y) < 0.001 &&
-    abs(body.force.z) < 0.001,
-    "Force should be cleared after integration",
-  )
-}
-
-@(test)
 test_physics_world_gravity_application :: proc(t: ^testing.T) {
   physics_world: World
   init(&physics_world, {0, -10, 0}, false)
@@ -342,25 +315,26 @@ test_box_box_collision_intersecting :: proc(t: ^testing.T) {
   }
   pos_a := [3]f32{0, 0, 0}
   pos_b := [3]f32{1.5, 0, 0}
-  point, normal, penetration, hit := test_box_box(
+  m, hit := collide_boxes(
     pos_a,
     linalg.QUATERNIONF32_IDENTITY,
     box_a,
     pos_b,
     linalg.QUATERNIONF32_IDENTITY,
     box_b,
+    0,
   )
   testing.expect(t, hit, "Boxes should intersect")
   testing.expect(
     t,
-    abs(penetration - 0.5) < 0.001,
+    abs(m.points[0].penetration - 0.5) < 0.001,
     "Penetration should be 0.5",
   )
   testing.expect(
     t,
-    abs(normal.x - 1.0) < 0.001 &&
-    abs(normal.y) < 0.001 &&
-    abs(normal.z) < 0.001,
+    abs(m.normal.x - 1.0) < 0.001 &&
+    abs(m.normal.y) < 0.001 &&
+    abs(m.normal.z) < 0.001,
     "Normal should be (1, 0, 0)",
   )
 }
@@ -373,13 +347,14 @@ test_box_box_collision_separated :: proc(t: ^testing.T) {
   box_b := BoxCollider {
     half_extents = {1, 1, 1},
   }
-  _, _, _, hit := test_box_box(
+  _, hit := collide_boxes(
     {0, 0, 0},
     linalg.QUATERNIONF32_IDENTITY,
     box_a,
     {5, 0, 0},
     linalg.QUATERNIONF32_IDENTITY,
     box_b,
+    0,
   )
   testing.expect(t, !hit, "Separated boxes should not intersect")
 }
@@ -394,25 +369,26 @@ test_box_box_collision_y_axis :: proc(t: ^testing.T) {
   }
   pos_a := [3]f32{0, 0, 0}
   pos_b := [3]f32{0, 1.5, 0}
-  _, normal, penetration, hit := test_box_box(
+  m, hit := collide_boxes(
     pos_a,
     linalg.QUATERNIONF32_IDENTITY,
     box_a,
     pos_b,
     linalg.QUATERNIONF32_IDENTITY,
     box_b,
+    0,
   )
   testing.expect(t, hit, "Boxes should intersect")
   testing.expect(
     t,
-    abs(penetration - 0.5) < 0.001,
+    abs(m.points[0].penetration - 0.5) < 0.001,
     "Penetration should be 0.5",
   )
   testing.expect(
     t,
-    abs(normal.y - 1.0) < 0.001 &&
-    abs(normal.x) < 0.001 &&
-    abs(normal.z) < 0.001,
+    abs(m.normal.y - 1.0) < 0.001 &&
+    abs(m.normal.x) < 0.001 &&
+    abs(m.normal.z) < 0.001,
     "Normal should be (0, 1, 0)",
   )
 }
@@ -658,13 +634,14 @@ test_swept_collider_sphere_sphere :: proc(t: ^testing.T) {
 
 @(test)
 test_torque_induces_angular_velocity :: proc(t: ^testing.T) {
-  body: DynamicRigidBody
-  rigid_body_init(&body, {}, linalg.QUATERNIONF32_IDENTITY, 1.0, true)
-  set_box_inertia(&body, {1, 1, 1})
-  torque := [3]f32{0, 10, 0}
-  body.torque = torque
-  dt := f32(0.016)
-  integrate(&body, dt)
+  world: World
+  init(&world, {0, 0, 0}, false)
+  defer shutdown(&world)
+  handle := create_dynamic_body(&world, collider = BoxCollider{half_extents = {1, 1, 1}})
+  body := get(&world, handle)
+  set_box_inertia(body, {1, 1, 1})
+  body.torque = {0, 10, 0}
+  step(&world, 0.016)
   testing.expect(
     t,
     abs(body.angular_velocity.y) > 0.01,
@@ -673,7 +650,7 @@ test_torque_induces_angular_velocity :: proc(t: ^testing.T) {
   testing.expect(
     t,
     abs(body.torque.y) < 0.001,
-    "Torque should be cleared after integration",
+    "Torque should be cleared after step",
   )
 }
 
@@ -918,14 +895,16 @@ test_resolve_contact_bias_correction :: proc(t: ^testing.T) {
 
 @(test)
 test_disable_rotation_prevents_angular_velocity :: proc(t: ^testing.T) {
-  body: DynamicRigidBody
-  rigid_body_init(&body)
-  set_box_inertia(&body, {1, 1, 1})
+  world: World
+  init(&world, {0, 0, 0}, false)
+  defer shutdown(&world)
+  handle := create_dynamic_body(&world, collider = BoxCollider{half_extents = {1, 1, 1}})
+  body := get(&world, handle)
+  set_box_inertia(body, {1, 1, 1})
   body.enable_rotation = false
-  torque := [3]f32{0, 10, 0}
-  body.torque = torque
-  dt := f32(0.016)
-  integrate(&body, dt)
+  update_world_inertia(body)
+  body.torque = {0, 10, 0}
+  step(&world, 0.016)
   testing.expect(
     t,
     abs(body.angular_velocity.x) < 0.001 &&
@@ -1005,55 +984,6 @@ test_disable_rotation_off_center_impulse_no_spin :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_force_application :: proc(t: ^testing.T) {
-  body: DynamicRigidBody
-  rigid_body_init(&body, mass = 10.0)
-  force := [3]f32{100, 50, 0}
-  apply_force(&body, force)
-  testing.expect(
-    t,
-    abs(body.force.x - 100) < 0.001 &&
-    abs(body.force.y - 50) < 0.001 &&
-    abs(body.force.z) < 0.001,
-    "Force should be applied correctly",
-  )
-  dt := f32(0.016)
-  integrate(&body, dt)
-  expected_vx := force.x * body.inv_mass * dt * (1.0 - body.linear_damping)
-  expected_vy := force.y * body.inv_mass * dt * (1.0 - body.linear_damping)
-  testing.expect(
-    t,
-    abs(body.velocity.x - expected_vx) < 0.01 &&
-    abs(body.velocity.y - expected_vy) < 0.01,
-    "Force should accelerate the body correctly",
-  )
-}
-
-@(test)
-test_obb_obb_collision_aligned :: proc(t: ^testing.T) {
-  box_a := BoxCollider {
-    half_extents = {1, 1, 1},
-  }
-  box_b := BoxCollider {
-    half_extents = {1, 1, 1},
-  }
-  _, normal, penetration, hit := test_box_box(
-    {0, 0, 0},
-    linalg.QUATERNIONF32_IDENTITY,
-    box_a,
-    {1.5, 0, 0},
-    linalg.QUATERNIONF32_IDENTITY,
-    box_b,
-  )
-  testing.expect(t, hit, "Aligned OBBs should intersect")
-  testing.expect(
-    t,
-    abs(penetration - 0.5) < 0.001,
-    "Penetration should be 0.5",
-  )
-}
-
-@(test)
 test_obb_obb_collision_rotated_45 :: proc(t: ^testing.T) {
   // Rotate box A by 45 degrees around Z axis
   rotation_a := linalg.quaternion_angle_axis(
@@ -1066,13 +996,14 @@ test_obb_obb_collision_rotated_45 :: proc(t: ^testing.T) {
   box_b := BoxCollider {
     half_extents = {1, 1, 1},
   }
-  _, _, _, hit := test_box_box(
+  _, hit := collide_boxes(
     {0, 0, 0},
     rotation_a,
     box_a,
     {1.2, 0, 0},
     linalg.QUATERNIONF32_IDENTITY,
     box_b,
+    0,
   )
   testing.expect(t, hit, "Rotated OBB should still intersect with aligned box")
 }
@@ -1095,13 +1026,14 @@ test_obb_obb_collision_both_rotated :: proc(t: ^testing.T) {
   }
   pos_a := [3]f32{0, 0, 0}
   pos_b := [3]f32{1.5, 0, 0}
-  _, _, _, hit := test_box_box(
+  _, hit := collide_boxes(
     pos_a,
     rotation_a,
     box_a,
     pos_b,
     rotation_b,
     box_b,
+    0,
   )
   testing.expect(t, hit, "Both rotated OBBs should intersect")
 }
@@ -1118,13 +1050,14 @@ test_obb_obb_collision_separated :: proc(t: ^testing.T) {
   box_b := BoxCollider {
     half_extents = {1, 1, 1},
   }
-  _, _, _, hit := test_box_box(
+  _, hit := collide_boxes(
     {0, 0, 0},
     rotation,
     box_a,
     {5, 0, 0},
     linalg.QUATERNIONF32_IDENTITY,
     box_b,
+    0,
   )
   testing.expect(t, !hit, "Separated OBBs should not intersect")
 }

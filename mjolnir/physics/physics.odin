@@ -17,7 +17,10 @@ SLEEP_ANGULAR_THRESHOLD :: 0.05
 SLEEP_LINEAR_THRESHOLD_SQ :: SLEEP_LINEAR_THRESHOLD * SLEEP_LINEAR_THRESHOLD
 SLEEP_ANGULAR_THRESHOLD_SQ :: SLEEP_ANGULAR_THRESHOLD * SLEEP_ANGULAR_THRESHOLD
 SLEEP_TIME_THRESHOLD :: 0.5
-ENABLE_VERBOSE_LOG :: false
+ENABLE_VERBOSE_LOG :: #config(PHYSICS_VERBOSE_LOG, false)
+// Millisecond timings in PerfFrame cost a dozen clock reads per step; compile
+// them out with -define:PHYSICS_PERF_STATS=false. Counters are always filled.
+PHYSICS_PERF_STATS :: #config(PHYSICS_PERF_STATS, true)
 MAX_LINEAR_SPEED :: #config(PHYSICS_MAX_LINEAR_SPEED, 400.0)
 MAX_ROTATION_PER_STEP :: 0.25 * math.PI
 BVH_REBUILD_THRESHOLD :: #config(PHYSICS_BVH_REBUILD_THRESHOLD, 512) // Rebuild BVH when killed bodies exceed this
@@ -33,15 +36,13 @@ TriggerHandle :: distinct cont.Handle
 PerfFrame :: struct {
   total_ms:                 f32,
   warmstart_prep_ms:        f32,
-  force_application_ms:     f32,
   ccd_ms:                   f32,
   bvh_build_ms:             f32,
   substep_total_ms:         f32,
   refit_ms:                 f32,
   broadphase_ms:            f32,
   prepare_ms:               f32,
-  solver_ms:                f32,
-  integration_substep_ms:   f32,
+  finalize_ms:              f32,
   cleanup_ms:               f32,
   dynamic_body_count:       int,
   static_body_count:        int,
@@ -291,7 +292,7 @@ destroy_body :: proc {
 }
 
 trigger_collides :: #force_inline proc(trigger: ^TriggerBody, body: ^RigidBody) -> bool {
-  _, _, _, hit := test_collision(
+  _, hit := collide(
     &trigger.collider, trigger.position, trigger.rotation,
     &body.collider, body.position, body.rotation,
   )
@@ -327,9 +328,10 @@ step_count_dynamic :: proc(self: ^World) -> (dynamic_count: int) {
 // Island-based sleeping (end of frame, post-solve velocities): bodies linked
 // by dynamic contacts sleep only when EVERY island member has been quiet for
 // SLEEP_TIME_THRESHOLD. Per-body sleep leaves boxes floating when their
-// support dozes off first; per-island can't.
+// support dozes off first; per-island can't. Also marks fallen bodies
+// (KILL_Y) for deferred removal in the same sweep.
 @(private)
-step_island_sleep :: proc(self: ^World, dt: f32) -> (awake_count: int) {
+step_island_sleep :: proc(self: ^World, dt: f32) -> (awake_count, sleeping_count: int) {
   n := len(self.bodies.entries)
   if n == 0 do return
   parent := make([]i32, n, context.temp_allocator)
@@ -382,11 +384,17 @@ step_island_sleep :: proc(self: ^World, dt: f32) -> (awake_count: int) {
     if !self.bodies.entries[i].active do continue
     body := &self.bodies.entries[i].item
     if body.is_killed do continue
+    if body.position.y < KILL_Y {
+      body.is_killed = true
+      self.killed_body_count += 1
+      continue
+    }
     root := find(parent, i32(i))
     if island_min[root] > SLEEP_TIME_THRESHOLD {
       body.is_sleeping = true
       body.velocity = {}
       body.angular_velocity = {}
+      sleeping_count += 1
     } else {
       awake_count += 1
     }
@@ -472,43 +480,34 @@ step_triggers :: proc(self: ^World) {
   }
 }
 
-@(private)
-step_cleanup_and_count :: proc(self: ^World) -> (sleeping_count: int) {
-  for i in 0 ..< len(self.bodies.entries) {
-    if !self.bodies.entries[i].active do continue
-    body := &self.bodies.entries[i].item
-    if body.is_killed do continue
-    if body.position.y < KILL_Y {
-      body.is_killed = true
-      self.killed_body_count += 1
-      continue
-    }
-    if body.is_sleeping do sleeping_count += 1
-  }
-  return
-}
-
+// Millisecond timing blocks compile out with PHYSICS_PERF_STATS=false;
+// the durations then stay zero.
 step :: proc(self: ^World, dt: f32) {
   if self.paused do return
-  step_start := time.now()
+  warmstart_prep_time, ccd_time, bvh_build_time: time.Duration
+  refit_time, broadphase_time, prepare_time, substep_time, finalize_time: time.Duration
+  cleanup_time, total_time: time.Duration
+  when PHYSICS_PERF_STATS {
+    step_start := time.now()
+    mark := step_start
+  }
 
-  warmstart_start := time.now()
   step_warmstart_prep(self)
-  warmstart_prep_time := time.since(warmstart_start)
+  when PHYSICS_PERF_STATS {
+    warmstart_prep_time = time.since(mark)
+  }
 
-  force_start := time.now()
   dynamic_body_count := step_count_dynamic(self)
-  force_application_time := time.since(force_start)
 
   ccd_handled := make([dynamic]bool, len(self.bodies.entries), context.temp_allocator)
-  ccd_start := time.now()
+  when PHYSICS_PERF_STATS do mark = time.now()
   ccd_bodies_tested, ccd_total_candidates: int
   if self.enable_parallel {
     ccd_bodies_tested, ccd_total_candidates = parallel_ccd(self, dt, ccd_handled[:], self.thread_count)
   } else {
     ccd_bodies_tested, ccd_total_candidates = sequential_ccd(self, dt, ccd_handled[:])
   }
-  ccd_time := time.since(ccd_start)
+  when PHYSICS_PERF_STATS do ccd_time = time.since(mark)
 
   static_body_count := 0
   for i in 0 ..< len(self.static_bodies.entries) {
@@ -517,39 +516,26 @@ step :: proc(self: ^World, dt: f32) {
 
   rebuild_dynamic_bvh := dynamic_body_count > self.last_dynamic_count || self.killed_body_count >= BVH_REBUILD_THRESHOLD
   rebuild_static_bvh := static_body_count > self.last_static_count
-  bvh_build_time: time.Duration
-  if rebuild_dynamic_bvh {
-    t := time.now()
-    step_rebuild_dynamic_bvh(self, dynamic_body_count)
-    bvh_build_time += time.since(t)
-  }
-  if rebuild_static_bvh {
-    t := time.now()
-    step_rebuild_static_bvh(self, static_body_count)
-    bvh_build_time += time.since(t)
+  if rebuild_dynamic_bvh || rebuild_static_bvh {
+    when PHYSICS_PERF_STATS do mark = time.now()
+    if rebuild_dynamic_bvh do step_rebuild_dynamic_bvh(self, dynamic_body_count)
+    if rebuild_static_bvh do step_rebuild_static_bvh(self, static_body_count)
+    when PHYSICS_PERF_STATS do bvh_build_time = time.since(mark)
   }
 
-  // Anchor frame-start positions for per-substep separation recovery
-  for i in 0 ..< len(self.bodies.entries) {
-    if !self.bodies.entries[i].active do continue
-    body := &self.bodies.entries[i].item
-    body.position0 = body.position
-  }
-
-  // All-asleep fast path: nothing can move, skip the whole pipeline
+  // Anchor frame-start positions for per-substep separation recovery, and
+  // check the all-asleep fast path (nothing can move → skip the pipeline)
   any_awake := false
   for i in 0 ..< len(self.bodies.entries) {
     if !self.bodies.entries[i].active do continue
     body := &self.bodies.entries[i].item
-    if body.is_killed || body.is_sleeping do continue
-    any_awake = true
-    break
+    body.position0 = body.position
+    if !body.is_killed && !body.is_sleeping do any_awake = true
   }
 
-  refit_time, broadphase_time, prepare_time, substep_time, integration_time: time.Duration
   substep_dt := dt / f32(NUM_SUBSTEPS)
   if any_awake {
-    refit_start := time.now()
+    when PHYSICS_PERF_STATS do mark = time.now()
     clear(&self.dynamic_contacts)
     clear(&self.static_contacts)
     if self.enable_parallel {
@@ -557,15 +543,17 @@ step :: proc(self: ^World, dt: f32) {
     } else {
       sequential_bvh_refit(self)
     }
-    refit_time = time.since(refit_start)
+    when PHYSICS_PERF_STATS {
+      refit_time = time.since(mark)
+      mark = time.now()
+    }
 
-    broadphase_start := time.now()
     if self.enable_parallel {
       parallel_collision_detection_traversal(self, self.thread_count)
     } else {
       sequential_collision_detection_traversal(self)
     }
-    broadphase_time = time.since(broadphase_start)
+    when PHYSICS_PERF_STATS do broadphase_time = time.since(mark)
 
     // Narrowphase may have woken sleeping bodies — build the dense awake
     // list only now
@@ -577,49 +565,52 @@ step :: proc(self: ^World, dt: f32) {
       append(&self.awake_list, u32(i))
     }
 
-    prepare_start := time.now()
+    when PHYSICS_PERF_STATS do mark = time.now()
     if self.enable_parallel {
       parallel_prepare_contacts(self, substep_dt, self.thread_count)
     } else {
       sequential_prepare_contacts(self, substep_dt)
     }
-    prepare_time = time.since(prepare_start)
+    when PHYSICS_PERF_STATS {
+      prepare_time = time.since(mark)
+      mark = time.now()
+    }
 
-    substep_start := time.now()
     run_substep_loop(self, substep_dt, NUM_SUBSTEPS, ccd_handled[:], self.thread_count)
-    substep_time = time.since(substep_start)
+    when PHYSICS_PERF_STATS {
+      substep_time = time.since(mark)
+      mark = time.now()
+    }
 
     // Finalize: refresh spatial caches once per frame
-    finalize_start := time.now()
     for li in 0 ..< len(self.awake_list) {
       body := &self.bodies.entries[self.awake_list[li]].item
       body.force = {}
       body.torque = {}
       update_cached_aabb(&body.base)
     }
-    integration_time = time.since(finalize_start)
+    when PHYSICS_PERF_STATS do finalize_time = time.since(mark)
   }
 
   step_triggers(self)
 
-  cleanup_start := time.now()
-  awake_body_count := step_island_sleep(self, dt)
-  sleeping_body_count := step_cleanup_and_count(self)
-  cleanup_time := time.since(cleanup_start)
+  when PHYSICS_PERF_STATS do mark = time.now()
+  awake_body_count, sleeping_body_count := step_island_sleep(self, dt)
+  when PHYSICS_PERF_STATS {
+    cleanup_time = time.since(mark)
+    total_time = time.since(step_start)
+  }
 
-  total_time := time.since(step_start)
   self.last_perf = PerfFrame {
     total_ms               = f32(time.duration_milliseconds(total_time)),
     warmstart_prep_ms      = f32(time.duration_milliseconds(warmstart_prep_time)),
-    force_application_ms   = f32(time.duration_milliseconds(force_application_time)),
     ccd_ms                 = f32(time.duration_milliseconds(ccd_time)),
     bvh_build_ms           = f32(time.duration_milliseconds(bvh_build_time)),
     substep_total_ms       = f32(time.duration_milliseconds(substep_time)),
     refit_ms               = f32(time.duration_milliseconds(refit_time)),
     broadphase_ms          = f32(time.duration_milliseconds(broadphase_time)),
     prepare_ms             = f32(time.duration_milliseconds(prepare_time)),
-    solver_ms              = f32(time.duration_milliseconds(substep_time)),
-    integration_substep_ms = f32(time.duration_milliseconds(integration_time)),
+    finalize_ms            = f32(time.duration_milliseconds(finalize_time)),
     cleanup_ms             = f32(time.duration_milliseconds(cleanup_time)),
     dynamic_body_count     = dynamic_body_count,
     static_body_count      = static_body_count,
@@ -637,18 +628,16 @@ step :: proc(self: ^World, dt: f32) {
   }
   when ENABLE_VERBOSE_LOG {
     log.infof(
-      "Physics: %.2fms total | warmstart=%.2fms force=%.2fms ccd=%.2fms bvh=%.2fms substeps=%.2fms [refit=%.2fms collision=%.2fms prep=%.2fms solve=%.2fms integ=%.2fms] cleanup=%.2fms | bodies dyn=%d sta=%d awake=%d contacts dyn=%d sta=%d",
+      "Physics: %.2fms total | warmstart=%.2fms ccd=%.2fms bvh=%.2fms [refit=%.2fms collision=%.2fms prep=%.2fms solve=%.2fms finalize=%.2fms] cleanup=%.2fms | bodies dyn=%d sta=%d awake=%d contacts dyn=%d sta=%d",
       time.duration_milliseconds(total_time),
       time.duration_milliseconds(warmstart_prep_time),
-      time.duration_milliseconds(force_application_time),
       time.duration_milliseconds(ccd_time),
       time.duration_milliseconds(bvh_build_time),
-      time.duration_milliseconds(substep_time),
       time.duration_milliseconds(refit_time),
       time.duration_milliseconds(broadphase_time),
       time.duration_milliseconds(prepare_time),
       time.duration_milliseconds(substep_time),
-      time.duration_milliseconds(integration_time),
+      time.duration_milliseconds(finalize_time),
       time.duration_milliseconds(cleanup_time),
       dynamic_body_count, static_body_count, awake_body_count,
       len(self.dynamic_contacts), len(self.static_contacts),

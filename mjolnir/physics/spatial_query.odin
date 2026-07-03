@@ -20,64 +20,67 @@ BodyHandleResult :: union {
   TriggerHandle,
 }
 
-// Physics raycast - finds closest body hit by ray
+// Test ray against one BVH's candidates, tightening `closest` in place.
+// first_hit stops at the first intersection (any-hit query).
+// Returns true if a hit was recorded.
+@(private = "file")
+raycast_candidates :: proc(
+  self: ^World,
+  candidates: []$E,
+  ray: geometry.Ray,
+  closest: ^RayHit,
+  first_hit: bool,
+) -> (found: bool) {
+  for candidate in candidates {
+    body := get(self, candidate.handle) or_continue
+    t, normal, hit := raycast_collider(
+      ray,
+      &body.collider,
+      body.position,
+      body.rotation,
+      closest.t,
+    )
+    if hit && t < closest.t {
+      closest^ = {
+        body_handle = candidate.handle,
+        t           = t,
+        point       = ray.origin + ray.direction * t,
+        normal      = normal,
+        hit         = true,
+      }
+      found = true
+      if first_hit do return
+    }
+  }
+  return
+}
+
+// Physics raycast - finds closest body hit by ray.
+// first_hit = true returns the first intersection found instead (early exit).
 raycast :: proc(
   self: ^World,
   ray: geometry.Ray,
   max_dist: f32 = max(f32),
+  first_hit := false,
 ) -> RayHit {
   closest_hit := RayHit {
     hit = false,
     t   = max_dist,
   }
-  // Query dynamic BVH
   dyn_candidates := make(
     [dynamic]DynamicBroadPhaseEntry,
     context.temp_allocator,
   )
   geometry.bvh_query_ray(&self.dynamic_bvh, ray, max_dist, &dyn_candidates)
-  for candidate in dyn_candidates {
-    body := get(self, candidate.handle) or_continue
-    collider := &body.collider
-    t, normal, hit := raycast_collider(
-      ray,
-      collider,
-      body.position,
-      body.rotation,
-      closest_hit.t,
-    )
-    if hit && t < closest_hit.t {
-      closest_hit.body_handle = candidate.handle
-      closest_hit.t = t
-      closest_hit.point = ray.origin + ray.direction * t
-      closest_hit.normal = normal
-      closest_hit.hit = true
-    }
+  if raycast_candidates(self, dyn_candidates[:], ray, &closest_hit, first_hit) && first_hit {
+    return closest_hit
   }
-  // Query static BVH
   static_candidates := make(
     [dynamic]StaticBroadPhaseEntry,
     context.temp_allocator,
   )
   geometry.bvh_query_ray(&self.static_bvh, ray, max_dist, &static_candidates)
-  for candidate in static_candidates {
-    body := get(self, candidate.handle) or_continue
-    collider := &body.collider
-    t, normal, hit := raycast_collider(
-      ray,
-      collider,
-      body.position,
-      body.rotation,
-      closest_hit.t,
-    )
-    if hit && t < closest_hit.t {
-      closest_hit.body_handle = candidate.handle
-      closest_hit.t = t
-      closest_hit.point = ray.origin + ray.direction * t
-      closest_hit.normal = normal
-      closest_hit.hit = true
-    }
-  }
+  raycast_candidates(self, static_candidates[:], ray, &closest_hit, first_hit)
   return closest_hit
 }
 
@@ -87,59 +90,7 @@ raycast_single :: proc(
   ray: geometry.Ray,
   max_dist: f32 = max(f32),
 ) -> RayHit {
-  // Query dynamic BVH
-  dyn_candidates := make(
-    [dynamic]DynamicBroadPhaseEntry,
-    context.temp_allocator,
-  )
-  geometry.bvh_query_ray(&self.dynamic_bvh, ray, max_dist, &dyn_candidates)
-  for candidate in dyn_candidates {
-    body := get(self, candidate.handle) or_continue
-    collider := &body.collider
-    t, normal, hit := raycast_collider(
-      ray,
-      collider,
-      body.position,
-      body.rotation,
-      max_dist,
-    )
-    if hit {
-      return RayHit {
-        body_handle = candidate.handle,
-        t = t,
-        point = ray.origin + ray.direction * t,
-        normal = normal,
-        hit = true,
-      }
-    }
-  }
-  // Query static BVH
-  static_candidates := make(
-    [dynamic]StaticBroadPhaseEntry,
-    context.temp_allocator,
-  )
-  geometry.bvh_query_ray(&self.static_bvh, ray, max_dist, &static_candidates)
-  for candidate in static_candidates {
-    body := get(self, candidate.handle) or_continue
-    collider := &body.collider
-    t, normal, hit := raycast_collider(
-      ray,
-      collider,
-      body.position,
-      body.rotation,
-      max_dist,
-    )
-    if hit {
-      return RayHit {
-        body_handle = candidate.handle,
-        t = t,
-        point = ray.origin + ray.direction * t,
-        normal = normal,
-        hit = true,
-      }
-    }
-  }
-  return {}
+  return raycast(self, ray, max_dist, first_hit = true)
 }
 
 // Raycast against trigger bodies only — linear scan over trigger pool
@@ -357,7 +308,7 @@ query_trigger :: proc(
   for candidate in dyn_candidates {
     body := get(self, candidate.handle) or_continue
     if body.is_killed do continue
-    _, _, _, hit := test_collision(
+    _, hit := collide(
       &trigger.collider,
       trigger.position,
       trigger.rotation,
@@ -391,7 +342,7 @@ query_trigger_static :: proc(
   )
   for candidate in static_candidates {
     body := get(self, candidate.handle) or_continue
-    _, _, _, hit := test_collision(
+    _, hit := collide(
       &trigger.collider,
       trigger.position,
       trigger.rotation,
