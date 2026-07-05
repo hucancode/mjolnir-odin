@@ -372,16 +372,12 @@ record_transparency_pass :: proc(
       {.DRAW_INDIRECT},
     )
   }
-  gpu.image_barrier(
+  gpu.memory_barrier(
     cmd,
-    depth_texture.image,
-    .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     {.SHADER_READ},
     {.DEPTH_STENCIL_ATTACHMENT_READ, .DEPTH_STENCIL_ATTACHMENT_WRITE},
     {.FRAGMENT_SHADER},
     {.EARLY_FRAGMENT_TESTS},
-    {.DEPTH},
   )
   gpu.begin_rendering(
     cmd,
@@ -461,18 +457,14 @@ record_transparency_pass :: proc(
   }
 
   vk.CmdEndRendering(cmd)
-  // Restore depth to READ_ONLY so subsequent shader sampling (e.g. depth
-  // pyramid build at start of next frame) reads a valid layout.
-  gpu.image_barrier(
+  // Make depth writes visible to shader sampling (e.g. depth pyramid build
+  // at start of next frame).
+  gpu.memory_barrier(
     cmd,
-    depth_texture.image,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
     {.DEPTH_STENCIL_ATTACHMENT_WRITE},
     {.SHADER_READ},
     {.LATE_FRAGMENT_TESTS},
     {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-    {.DEPTH},
   )
   return .SUCCESS
 }
@@ -521,26 +513,18 @@ record_post_process_pass :: proc(
     &self.texture_manager,
     cam.attachments[.FINAL_IMAGE][frame_index],
   ); final_image != nil {
-    gpu.image_barrier(
+    gpu.memory_barrier(
       cmd,
-      final_image.image,
-      .COLOR_ATTACHMENT_OPTIMAL,
-      .SHADER_READ_ONLY_OPTIMAL,
       {.COLOR_ATTACHMENT_WRITE},
       {.SHADER_READ},
       {.COLOR_ATTACHMENT_OUTPUT},
       {.FRAGMENT_SHADER},
-      {.COLOR},
     )
   }
-  gpu.image_barrier(
+  gpu.image_discard_barrier(
     cmd,
     swapchain_image,
-    .UNDEFINED,
-    .COLOR_ATTACHMENT_OPTIMAL,
-    {},
     {.COLOR_ATTACHMENT_WRITE},
-    {.TOP_OF_PIPE},
     {.COLOR_ATTACHMENT_OUTPUT},
     {.COLOR},
   )
@@ -576,7 +560,7 @@ record_ui_pass :: proc(
   rendering_attachment_info := vk.RenderingAttachmentInfo {
     sType       = .RENDERING_ATTACHMENT_INFO,
     imageView   = swapchain_view,
-    imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+    imageLayout = .GENERAL,
     loadOp      = .LOAD,
     storeOp     = .STORE,
   }
@@ -623,7 +607,8 @@ record_ui_pass :: proc(
 // record_frame drives the entire per-frame command sequence: shadow maps,
 // per-camera passes (geometry, lighting, particles, transparency), debug,
 // post-process, UI, async compute, optional debug-UI overlay, and the
-// final swapchain transition to PRESENT_SRC.
+// final swapchain transition to PRESENT_SRC — the one layout transition
+// unified image layouts doesn't cover (the compositor is outside Vulkan).
 record_frame :: proc(
   self: ^Manager,
   gctx: ^gpu.GPUContext,
@@ -707,7 +692,7 @@ record_frame :: proc(
     srcStageMask = {.COLOR_ATTACHMENT_OUTPUT},
     srcAccessMask = {.COLOR_ATTACHMENT_WRITE},
     dstStageMask = {.BOTTOM_OF_PIPE},
-    oldLayout = .COLOR_ATTACHMENT_OPTIMAL,
+    oldLayout = .GENERAL,
     newLayout = .PRESENT_SRC_KHR,
     srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
     dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,

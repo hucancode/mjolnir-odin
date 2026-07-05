@@ -618,14 +618,10 @@ record :: proc(
         )
         continue
       }
-      gpu.image_barrier(
+      gpu.image_discard_barrier(
         command_buffer,
         dst_texture.image,
-        .UNDEFINED,
-        .COLOR_ATTACHMENT_OPTIMAL,
-        {},
         {.COLOR_ATTACHMENT_WRITE},
-        {.TOP_OF_PIPE},
         {.COLOR_ATTACHMENT_OUTPUT},
         {.COLOR},
       )
@@ -643,16 +639,12 @@ record :: proc(
         )
         continue
       }
-      gpu.image_barrier(
+      gpu.memory_barrier(
         command_buffer,
-        src_texture.image,
-        .COLOR_ATTACHMENT_OPTIMAL,
-        .SHADER_READ_ONLY_OPTIMAL,
         {.COLOR_ATTACHMENT_WRITE},
         {.SHADER_READ},
         {.COLOR_ATTACHMENT_OUTPUT},
         {.FRAGMENT_SHADER},
-        {.COLOR},
       )
     }
     input_image_index := current_input_image_idx

@@ -185,7 +185,7 @@ record :: proc(
   emissive_texture := gpu.get_texture_2d(texture_manager, emissive_handle)
   final_texture := gpu.get_texture_2d(texture_manager, final_image_handle)
   depth_texture := gpu.get_texture_2d(texture_manager, depth_handle)
-  // Transition each color attachment + final image: UNDEFINED → COLOR_ATTACHMENT.
+  // Discard previous contents of the G-buffer + final image + depth.
   for img in ([?]vk.Image {
        position_texture.image,
        normal_texture.image,
@@ -194,26 +194,18 @@ record :: proc(
        emissive_texture.image,
        final_texture.image,
      }) {
-    gpu.image_barrier(
+    gpu.image_discard_barrier(
       command_buffer,
       img,
-      .UNDEFINED,
-      .COLOR_ATTACHMENT_OPTIMAL,
-      {},
       {.COLOR_ATTACHMENT_WRITE},
-      {.TOP_OF_PIPE},
       {.COLOR_ATTACHMENT_OUTPUT},
       {.COLOR},
     )
   }
-  gpu.image_barrier(
+  gpu.image_discard_barrier(
     command_buffer,
     depth_texture.image,
-    .UNDEFINED,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    {},
     {.DEPTH_STENCIL_ATTACHMENT_WRITE},
-    {.TOP_OF_PIPE},
     {.EARLY_FRAGMENT_TESTS},
     {.DEPTH},
   )
@@ -262,38 +254,13 @@ record :: proc(
     u32(size_of(vk.DrawIndexedIndirectCommand)),
   )
   vk.CmdEndRendering(command_buffer)
-  // Transition G-buffer color attachments + depth to SHADER_READ_ONLY for the
-  // lighting pass that follows. (final_image stays in COLOR_ATTACHMENT_OPTIMAL
-  // so subsequent passes can keep writing to it under .LOAD.)
-  for img in ([?]vk.Image {
-       position_texture.image,
-       normal_texture.image,
-       albedo_texture.image,
-       metallic_roughness_texture.image,
-       emissive_texture.image,
-     }) {
-    gpu.image_barrier(
-      command_buffer,
-      img,
-      .COLOR_ATTACHMENT_OPTIMAL,
-      .SHADER_READ_ONLY_OPTIMAL,
-      {.COLOR_ATTACHMENT_WRITE},
-      {.SHADER_READ},
-      {.COLOR_ATTACHMENT_OUTPUT},
-      {.FRAGMENT_SHADER},
-      {.COLOR},
-    )
-  }
-  gpu.image_barrier(
+  // Make G-buffer + depth writes visible to the lighting pass that follows.
+  gpu.memory_barrier(
     command_buffer,
-    depth_texture.image,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-    {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+    {.COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE},
     {.SHADER_READ},
-    {.LATE_FRAGMENT_TESTS},
+    {.COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS},
     {.COMPUTE_SHADER, .FRAGMENT_SHADER},
-    {.DEPTH},
   )
 }
 

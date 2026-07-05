@@ -304,7 +304,6 @@ begin_pass :: proc(
       depth_texture,
       .LOAD,
       .DONT_CARE,
-      layout = .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
     ),
     gpu.create_color_attachment(final_image, .LOAD, .STORE, BG_BLUE_GRAY),
   )

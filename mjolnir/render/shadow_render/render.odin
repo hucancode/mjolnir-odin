@@ -230,14 +230,10 @@ render :: proc(
   )
   depth_texture := gpu.get_texture_2d(texture_manager, shadow_map)
   if depth_texture == nil do return
-  gpu.image_barrier(
+  gpu.image_discard_barrier(
     command_buffer,
     depth_texture.image,
-    .UNDEFINED,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    {},
     {.DEPTH_STENCIL_ATTACHMENT_WRITE},
-    {.TOP_OF_PIPE},
     {.EARLY_FRAGMENT_TESTS},
     {.DEPTH},
   )
@@ -288,15 +284,11 @@ render :: proc(
     u32(size_of(vk.DrawIndexedIndirectCommand)),
   )
   vk.CmdEndRendering(command_buffer)
-  gpu.image_barrier(
+  gpu.memory_barrier(
     command_buffer,
-    depth_texture.image,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
     {.DEPTH_STENCIL_ATTACHMENT_WRITE},
     {.SHADER_READ},
     {.LATE_FRAGMENT_TESTS},
     {.FRAGMENT_SHADER},
-    {.DEPTH},
   )
 }

@@ -101,20 +101,16 @@ camera_init :: proc(
       {.DEPTH_STENCIL_ATTACHMENT, .SAMPLED},
     ) or_return
 
-    // Transition depth image from UNDEFINED to DEPTH_STENCIL_READ_ONLY_OPTIMAL
+    // Move fresh depth image out of UNDEFINED so first-frame sampling is valid
     if depth := gpu.get_texture_2d(
       texture_manager,
       camera.attachments[.DEPTH][frame],
     ); depth != nil {
       cmd_buf := gpu.begin_single_time_command(gctx) or_return
-      gpu.image_barrier(
+      gpu.image_discard_barrier(
         cmd_buf,
         depth.image,
-        .UNDEFINED,
-        .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-        {},
         {.DEPTH_STENCIL_ATTACHMENT_READ},
-        {.TOP_OF_PIPE},
         {.EARLY_FRAGMENT_TESTS},
         {.DEPTH},
       )
@@ -326,7 +322,7 @@ camera_allocate_descriptors :: proc(
         source_info = {
           sampler     = pyramid.sampler,
           imageView   = prev_depth.view,
-          imageLayout = .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+          imageLayout = .GENERAL,
         }
       } else {
         source_info = {
@@ -478,14 +474,10 @@ camera_resize :: proc(
       camera.attachments[.DEPTH][frame],
     ); depth != nil {
       cmd_buf := gpu.begin_single_time_command(gctx) or_return
-      gpu.image_barrier(
+      gpu.image_discard_barrier(
         cmd_buf,
         depth.image,
-        .UNDEFINED,
-        .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-        {},
         {.DEPTH_STENCIL_ATTACHMENT_READ},
-        {.TOP_OF_PIPE},
         {.EARLY_FRAGMENT_TESTS},
         {.DEPTH},
       )

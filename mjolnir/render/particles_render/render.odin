@@ -188,7 +188,6 @@ record :: proc(
 			depth_texture,
 			.LOAD,
 			.STORE,
-			layout = .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
 		),
 		gpu.create_color_attachment(color_texture, .LOAD, .STORE),
 	)

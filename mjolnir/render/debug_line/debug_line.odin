@@ -231,7 +231,6 @@ record :: proc(
       depth_image,
       .LOAD,
       .STORE,
-      layout = .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
     ),
     gpu.create_color_attachment_view(color_view, .LOAD, .STORE),
   )

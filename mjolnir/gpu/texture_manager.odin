@@ -277,7 +277,7 @@ set_texture_2d_descriptor :: proc(
       .SAMPLED_IMAGE,
       vk.DescriptorImageInfo {
         imageView = image_view,
-        imageLayout = .SHADER_READ_ONLY_OPTIMAL,
+        imageLayout = .GENERAL,
       },
     },
   )
@@ -302,7 +302,7 @@ set_texture_cube_descriptor :: proc(
       .SAMPLED_IMAGE,
       vk.DescriptorImageInfo {
         imageView = image_view,
-        imageLayout = .SHADER_READ_ONLY_OPTIMAL,
+        imageLayout = .GENERAL,
       },
     },
   )

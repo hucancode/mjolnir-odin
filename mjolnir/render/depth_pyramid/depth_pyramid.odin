@@ -111,17 +111,13 @@ setup_pyramid :: proc(
     return .ERROR_OUT_OF_DEVICE_MEMORY
   }
 
-  // Transition all mip levels to GENERAL layout
+  // Move all mip levels out of UNDEFINED
   {
     cmd_buf := gpu.begin_single_time_command(gctx) or_return
-    gpu.image_barrier(
+    gpu.image_discard_barrier(
       cmd_buf,
       pyramid_texture.image,
-      .UNDEFINED,
-      .GENERAL,
-      {},
       {.SHADER_READ, .SHADER_WRITE},
-      {.TOP_OF_PIPE},
       {.COMPUTE_SHADER},
       {.COLOR},
       level_count = mip_levels,

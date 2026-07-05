@@ -175,14 +175,10 @@ render :: proc(
   )
   depth_cube := gpu.get_texture_cube(texture_manager, shadow_map)
   if depth_cube == nil do return
-  gpu.image_barrier(
+  gpu.image_discard_barrier(
     command_buffer,
     depth_cube.image,
-    .UNDEFINED,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    {},
     {.DEPTH_STENCIL_ATTACHMENT_WRITE},
-    {.TOP_OF_PIPE},
     {.EARLY_FRAGMENT_TESTS},
     {.DEPTH},
     layer_count = 6,
@@ -246,16 +242,11 @@ render :: proc(
     u32(size_of(vk.DrawIndexedIndirectCommand)),
   )
   vk.CmdEndRendering(command_buffer)
-  gpu.image_barrier(
+  gpu.memory_barrier(
     command_buffer,
-    depth_cube.image,
-    .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    .DEPTH_STENCIL_READ_ONLY_OPTIMAL,
     {.DEPTH_STENCIL_ATTACHMENT_WRITE},
     {.SHADER_READ},
     {.LATE_FRAGMENT_TESTS},
     {.FRAGMENT_SHADER},
-    {.DEPTH},
-    layer_count = 6,
   )
 }

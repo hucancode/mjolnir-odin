@@ -190,7 +190,6 @@ image_create_with_data :: proc(
   spec: ImageSpec,
   data: rawptr,
   size: vk.DeviceSize,
-  initial_layout: vk.ImageLayout = .SHADER_READ_ONLY_OPTIMAL,
 ) -> (
   img: Image,
   ret: vk.Result,
@@ -209,15 +208,10 @@ image_create_with_data :: proc(
   ) or_return
   defer mutable_buffer_destroy(gctx.device, &staging)
   cmd_buffer := begin_single_time_command(gctx) or_return
-  // Transition to transfer dst
-  image_barrier(
+  image_discard_barrier(
     cmd_buffer,
     img.image,
-    .UNDEFINED,
-    .TRANSFER_DST_OPTIMAL,
-    {},
     {.TRANSFER_WRITE},
-    {.TOP_OF_PIPE},
     {.TRANSFER},
     img.spec.aspect_mask,
     layer_count = max(img.spec.array_layers, 1),
@@ -235,22 +229,17 @@ image_create_with_data :: proc(
     cmd_buffer,
     staging.buffer,
     img.image,
-    .TRANSFER_DST_OPTIMAL,
+    .GENERAL,
     1,
     &region,
   )
-  // Transition to final layout
-  image_barrier(
+  // Make transfer writes visible to shader sampling
+  memory_barrier(
     cmd_buffer,
-    img.image,
-    .TRANSFER_DST_OPTIMAL,
-    initial_layout,
     {.TRANSFER_WRITE},
     {.SHADER_READ},
     {.TRANSFER},
     {.FRAGMENT_SHADER},
-    img.spec.aspect_mask,
-    layer_count = max(img.spec.array_layers, 1),
   )
   end_single_time_command(gctx, &cmd_buffer) or_return
   return img, .SUCCESS
@@ -297,30 +286,15 @@ image_create_with_mipmaps :: proc(
   ) or_return
   defer mutable_buffer_destroy(gctx.device, &staging)
   cmd_buffer := begin_single_time_command(gctx) or_return
-  // Transition all mip levels to TRANSFER_DST_OPTIMAL
-  barrier := vk.ImageMemoryBarrier2 {
-    sType = .IMAGE_MEMORY_BARRIER_2,
-    image = img.image,
-    srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
-    dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
-    oldLayout = .UNDEFINED,
-    newLayout = .TRANSFER_DST_OPTIMAL,
-    srcStageMask = {.TOP_OF_PIPE},
-    srcAccessMask = {},
-    dstStageMask = {.TRANSFER},
-    dstAccessMask = {.TRANSFER_WRITE},
-    subresourceRange = {
-      aspectMask = img.spec.aspect_mask,
-      layerCount = max(img.spec.array_layers, 1),
-      levelCount = img.spec.mip_levels,
-    },
-  }
-  dep := vk.DependencyInfo {
-    sType                   = .DEPENDENCY_INFO,
-    imageMemoryBarrierCount = 1,
-    pImageMemoryBarriers    = &barrier,
-  }
-  vk.CmdPipelineBarrier2(cmd_buffer, &dep)
+  image_discard_barrier(
+    cmd_buffer,
+    img.image,
+    {.TRANSFER_WRITE},
+    {.TRANSFER},
+    img.spec.aspect_mask,
+    level_count = img.spec.mip_levels,
+    layer_count = max(img.spec.array_layers, 1),
+  )
   // Copy base mip level from staging buffer
   region := vk.BufferImageCopy {
     imageSubresource = {
@@ -333,7 +307,7 @@ image_create_with_mipmaps :: proc(
     cmd_buffer,
     staging.buffer,
     img.image,
-    .TRANSFER_DST_OPTIMAL,
+    .GENERAL,
     1,
     &region,
   )
@@ -341,16 +315,14 @@ image_create_with_mipmaps :: proc(
   mip_width := i32(img.spec.width)
   mip_height := i32(img.spec.height)
   for i in 1 ..< img.spec.mip_levels {
-    // Transition previous mip to TRANSFER_SRC
-    barrier.subresourceRange.baseMipLevel = i - 1
-    barrier.subresourceRange.levelCount = 1
-    barrier.oldLayout = .TRANSFER_DST_OPTIMAL
-    barrier.newLayout = .TRANSFER_SRC_OPTIMAL
-    barrier.srcStageMask = {.TRANSFER}
-    barrier.srcAccessMask = {.TRANSFER_WRITE}
-    barrier.dstStageMask = {.TRANSFER}
-    barrier.dstAccessMask = {.TRANSFER_READ}
-    vk.CmdPipelineBarrier2(cmd_buffer, &dep)
+    // Previous mip's writes must land before this blit reads it
+    memory_barrier(
+      cmd_buffer,
+      {.TRANSFER_WRITE},
+      {.TRANSFER_READ},
+      {.TRANSFER},
+      {.TRANSFER},
+    )
     // Blit from previous mip to current mip
     blit := vk.ImageBlit {
       srcOffsets = {{0, 0, 0}, {mip_width, mip_height, 1}},
@@ -372,33 +344,24 @@ image_create_with_mipmaps :: proc(
     vk.CmdBlitImage(
       cmd_buffer,
       img.image,
-      .TRANSFER_SRC_OPTIMAL,
+      .GENERAL,
       img.image,
-      .TRANSFER_DST_OPTIMAL,
+      .GENERAL,
       1,
       &blit,
       .LINEAR,
     )
-    // Transition previous mip to SHADER_READ_ONLY
-    barrier.oldLayout = .TRANSFER_SRC_OPTIMAL
-    barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
-    barrier.srcStageMask = {.TRANSFER}
-    barrier.srcAccessMask = {.TRANSFER_READ}
-    barrier.dstStageMask = {.FRAGMENT_SHADER}
-    barrier.dstAccessMask = {.SHADER_READ}
-    vk.CmdPipelineBarrier2(cmd_buffer, &dep)
     mip_width = max(mip_width / 2, 1)
     mip_height = max(mip_height / 2, 1)
   }
-  // Transition last mip level to SHADER_READ_ONLY
-  barrier.subresourceRange.baseMipLevel = img.spec.mip_levels - 1
-  barrier.oldLayout = .TRANSFER_DST_OPTIMAL
-  barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
-  barrier.srcStageMask = {.TRANSFER}
-  barrier.srcAccessMask = {.TRANSFER_WRITE}
-  barrier.dstStageMask = {.FRAGMENT_SHADER}
-  barrier.dstAccessMask = {.SHADER_READ}
-  vk.CmdPipelineBarrier2(cmd_buffer, &dep)
+  // Make all mip writes visible to shader sampling
+  memory_barrier(
+    cmd_buffer,
+    {.TRANSFER_WRITE},
+    {.SHADER_READ},
+    {.TRANSFER},
+    {.FRAGMENT_SHADER},
+  )
   end_single_time_command(gctx, &cmd_buffer) or_return
   log.debugf(
     "Generated %d mip levels for image 0x%x",

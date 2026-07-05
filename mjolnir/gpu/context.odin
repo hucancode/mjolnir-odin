@@ -20,7 +20,17 @@ FRAMES_IN_FLIGHT :: #config(FRAMES_IN_FLIGHT, 2)
 ENGINE_NAME :: "Mjolnir"
 TITLE :: "Mjolnir"
 
-DEVICE_EXTENSIONS :: []cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
+// not yet in vendor bindings (needs vulkan header >= 315)
+PhysicalDeviceUnifiedImageLayoutsFeaturesKHR :: struct {
+  sType:                                       vk.StructureType,
+  pNext:                                       rawptr,
+  unifiedImageLayouts, unifiedImageLayoutsVideo: b32,
+}
+
+DEVICE_EXTENSIONS :: []cstring {
+  vk.KHR_SWAPCHAIN_EXTENSION_NAME,
+  "VK_KHR_unified_image_layouts",
+}
 
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
@@ -315,8 +325,12 @@ score_physical_device :: proc(
         continue required_loop
       }
     }
-    log.infof("vulkan: device does not support required extension", required)
-    return 0, .NOT_READY
+    log.infof(
+      "Device %s: missing required extension %q.",
+      device_name_cstring,
+      required,
+    )
+    return 0, .SUCCESS
   }
   log.infof("vulkan: device supports all required extensions")
   support := query_swapchain_support(device, self.surface) or_return
@@ -483,12 +497,17 @@ logical_device_init :: proc(self: ^GPUContext) -> vk.Result {
       },
     )
   }
+  unified_layouts_features := PhysicalDeviceUnifiedImageLayoutsFeaturesKHR {
+    sType               = vk.StructureType(1000527000),
+    unifiedImageLayouts = true,
+  }
   // Enable descriptor indexing features
   vulkan_13_features := vk.PhysicalDeviceVulkan13Features {
     sType                          = .PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
     dynamicRendering               = true,
     synchronization2               = true,
     shaderDemoteToHelperInvocation = true,
+    pNext                          = &unified_layouts_features,
   }
   REQUIRE_GEOMETRY_SHADER :: #config(
     REQUIRE_GEOMETRY_SHADER,

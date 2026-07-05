@@ -194,14 +194,14 @@ precompute :: proc(
   cmd := gpu.begin_single_time_command(gctx) or_return
 
   // 1. Equirect 2D -> env cubemap.
-  // env cube was just allocated, layout is UNDEFINED; we need GENERAL for storage write.
-  gpu.image_barrier(
+  // env cube was just allocated; move out of UNDEFINED for storage write.
+  gpu.image_discard_barrier(
     cmd,
     env_img.image,
-    .UNDEFINED, .GENERAL,
-    {}, {.SHADER_WRITE},
-    {.TOP_OF_PIPE}, {.COMPUTE_SHADER},
-    {.COLOR}, 0, 1, 0, 6,
+    {.SHADER_WRITE},
+    {.COMPUTE_SHADER},
+    {.COLOR},
+    layer_count = 6,
   )
   vk.CmdBindPipeline(cmd, .COMPUTE, equirect_pipe)
   vk.CmdBindDescriptorSets(cmd, .COMPUTE, equirect_layout, 0, 1, &ds[0], 0, nil)
@@ -211,24 +211,21 @@ precompute :: proc(
   )
   vk.CmdDispatch(cmd, (ENV_CUBE_SIZE + 7) / 8, (ENV_CUBE_SIZE + 7) / 8, 6)
 
-  // Transition env cubemap GENERAL -> SHADER_READ_ONLY so downstream samples it.
-  gpu.image_barrier(
+  // Make env cubemap writes visible to downstream sampling.
+  gpu.memory_barrier(
     cmd,
-    env_img.image,
-    .GENERAL, .SHADER_READ_ONLY_OPTIMAL,
     {.SHADER_WRITE}, {.SHADER_READ},
     {.COMPUTE_SHADER}, {.COMPUTE_SHADER},
-    {.COLOR}, 0, 1, 0, 6,
   )
 
   // 2. Env cube -> irradiance cubemap.
-  gpu.image_barrier(
+  gpu.image_discard_barrier(
     cmd,
     irr_img.image,
-    .UNDEFINED, .GENERAL,
-    {}, {.SHADER_WRITE},
-    {.TOP_OF_PIPE}, {.COMPUTE_SHADER},
-    {.COLOR}, 0, 1, 0, 6,
+    {.SHADER_WRITE},
+    {.COMPUTE_SHADER},
+    {.COLOR},
+    layer_count = 6,
   )
   vk.CmdBindPipeline(cmd, .COMPUTE, irradiance_pipe)
   vk.CmdBindDescriptorSets(cmd, .COMPUTE, irradiance_layout, 0, 1, &ds[1], 0, nil)
@@ -240,23 +237,21 @@ precompute :: proc(
     cmd, irradiance_layout, {.COMPUTE}, 0, size_of(IrradiancePush), &ip,
   )
   vk.CmdDispatch(cmd, (IRRADIANCE_SIZE + 7) / 8, (IRRADIANCE_SIZE + 7) / 8, 6)
-  gpu.image_barrier(
+  gpu.memory_barrier(
     cmd,
-    irr_img.image,
-    .GENERAL, .SHADER_READ_ONLY_OPTIMAL,
     {.SHADER_WRITE}, {.SHADER_READ},
     {.COMPUTE_SHADER}, {.FRAGMENT_SHADER},
-    {.COLOR}, 0, 1, 0, 6,
   )
 
   // 3. Env cube -> prefiltered specular cube (per-mip).
-  gpu.image_barrier(
+  gpu.image_discard_barrier(
     cmd,
     pre_img.image,
-    .UNDEFINED, .GENERAL,
-    {}, {.SHADER_WRITE},
-    {.TOP_OF_PIPE}, {.COMPUTE_SHADER},
-    {.COLOR}, 0, PREFILTER_MIPS, 0, 6,
+    {.SHADER_WRITE},
+    {.COMPUTE_SHADER},
+    {.COLOR},
+    level_count = PREFILTER_MIPS,
+    layer_count = 6,
   )
   vk.CmdBindPipeline(cmd, .COMPUTE, prefilter_pipe)
   for i in 0 ..< u32(PREFILTER_MIPS) {
@@ -275,13 +270,10 @@ precompute :: proc(
     )
     vk.CmdDispatch(cmd, (mip_size + 7) / 8, (mip_size + 7) / 8, 6)
   }
-  gpu.image_barrier(
+  gpu.memory_barrier(
     cmd,
-    pre_img.image,
-    .GENERAL, .SHADER_READ_ONLY_OPTIMAL,
     {.SHADER_WRITE}, {.SHADER_READ},
     {.COMPUTE_SHADER}, {.FRAGMENT_SHADER},
-    {.COLOR}, 0, PREFILTER_MIPS, 0, 6,
   )
 
   gpu.end_single_time_command(gctx, &cmd) or_return
@@ -333,7 +325,7 @@ write_compute_ds :: proc(
       info = vk.DescriptorImageInfo{
         sampler = sampler,
         imageView = src_view,
-        imageLayout = .SHADER_READ_ONLY_OPTIMAL,
+        imageLayout = .GENERAL,
       },
     },
     {

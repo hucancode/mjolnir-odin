@@ -689,37 +689,28 @@ bind_compute_pipeline :: proc(
   )
 }
 
-image_barrier :: proc(
+image_discard_barrier :: proc(
   command_buffer: vk.CommandBuffer,
   image: vk.Image,
-  old_layout: vk.ImageLayout,
-  new_layout: vk.ImageLayout,
-  src_access: vk.AccessFlags2,
   dst_access: vk.AccessFlags2,
-  src_stage: vk.PipelineStageFlags2,
   dst_stage: vk.PipelineStageFlags2,
   aspect_mask: vk.ImageAspectFlags,
-  mip_level: u32 = 0,
   level_count: u32 = 1,
-  base_layer: u32 = 0,
   layer_count: u32 = 1,
 ) {
   barrier := vk.ImageMemoryBarrier2 {
     sType = .IMAGE_MEMORY_BARRIER_2,
-    srcStageMask = src_stage,
-    srcAccessMask = src_access,
+    srcStageMask = {.TOP_OF_PIPE},
     dstStageMask = dst_stage,
     dstAccessMask = dst_access,
-    oldLayout = old_layout,
-    newLayout = new_layout,
+    oldLayout = .UNDEFINED,
+    newLayout = .GENERAL,
     srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
     dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
     image = image,
     subresourceRange = {
       aspectMask = aspect_mask,
-      baseMipLevel = mip_level,
       levelCount = level_count,
-      baseArrayLayer = base_layer,
       layerCount = layer_count,
     },
   }
@@ -872,7 +863,7 @@ create_color_attachment :: proc(
   return vk.RenderingAttachmentInfo {
     sType = .RENDERING_ATTACHMENT_INFO,
     imageView = image.view,
-    imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+    imageLayout = .GENERAL,
     loadOp = load_op,
     storeOp = store_op,
     clearValue = {color = {float32 = {0.0, 0.0, 0.0, 1.0}}},
@@ -888,7 +879,7 @@ create_color_attachment_view :: proc(
   return vk.RenderingAttachmentInfo {
     sType = .RENDERING_ATTACHMENT_INFO,
     imageView = image_view,
-    imageLayout = .COLOR_ATTACHMENT_OPTIMAL,
+    imageLayout = .GENERAL,
     loadOp = load_op,
     storeOp = store_op,
     clearValue = {color = {float32 = {0.0, 0.0, 0.0, 1.0}}},
@@ -900,12 +891,11 @@ create_depth_attachment :: proc(
   load_op: vk.AttachmentLoadOp = .CLEAR,
   store_op: vk.AttachmentStoreOp = .STORE,
   clear_depth: f32 = 1.0,
-  layout: vk.ImageLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 ) -> vk.RenderingAttachmentInfo {
   return vk.RenderingAttachmentInfo {
     sType = .RENDERING_ATTACHMENT_INFO,
     imageView = image.view,
-    imageLayout = layout,
+    imageLayout = .GENERAL,
     loadOp = load_op,
     storeOp = store_op,
     clearValue = {depthStencil = {depth = clear_depth}},
@@ -921,7 +911,7 @@ create_cube_depth_attachment :: proc(
   return vk.RenderingAttachmentInfo {
     sType = .RENDERING_ATTACHMENT_INFO,
     imageView = image.view,
-    imageLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    imageLayout = .GENERAL,
     loadOp = load_op,
     storeOp = store_op,
     clearValue = {depthStencil = {depth = clear_depth}},
